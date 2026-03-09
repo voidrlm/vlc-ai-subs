@@ -61,8 +61,7 @@ Then:
 vlc-ai-subs/
 ├── aisubs.lua           # VLC Lua extension (the UI)
 ├── aisubs_whisper.py     # Python Whisper backend
-├── setup.sh              # One-command installer
-├── install.sh            # VLC extension installer
+├── setup.sh              # Setup & install script
 ├── LICENSE
 └── README.md
 ```
@@ -82,6 +81,11 @@ If `setup.sh` doesn't work for your setup:
    - **macOS**: `~/Library/Application Support/org.videolan.vlc/lua/extensions/`
 
 3. Restart VLC.
+
+To update just the VLC extension without reinstalling Python deps:
+```bash
+./setup.sh --install
+```
 
 ## License
 
