@@ -10,14 +10,24 @@ VLC media player plugin that generates subtitles using OpenAI Whisper — works 
 - **5 model sizes** — From `tiny` (fastest) to `large` (most accurate)
 - **Quiet voice detection** — Tuned to catch whispers, husky voices, and low speech
 - **VLC 3.x & 4.x** — Compatible with both versions
-- **Cross-platform** — Linux (native, snap, flatpak) and macOS
+- **Cross-platform** — Windows, macOS, and Linux (native, snap, flatpak)
 
 ## Quick Start
+
+### Linux / macOS
 
 ```bash
 git clone https://github.com/voidrlm/vlc-ai-subs.git
 cd vlc-ai-subs
 ./setup.sh
+```
+
+### Windows
+
+```
+git clone https://github.com/voidrlm/vlc-ai-subs.git
+cd vlc-ai-subs
+setup.bat
 ```
 
 Then:
@@ -60,31 +70,35 @@ Then:
 ```
 vlc-ai-subs/
 ├── aisubs.lua           # VLC Lua extension (the UI)
-├── aisubs_whisper.py     # Python Whisper backend
-├── setup.sh              # Setup & install script
+├── aisubs_whisper.py    # Python Whisper backend
+├── setup.sh             # Setup & install (Linux / macOS)
+├── setup.bat            # Setup & install (Windows)
 ├── LICENSE
 └── README.md
 ```
 
 ## Manual Installation
 
-If `setup.sh` doesn't work for your setup:
+If the setup script doesn't work for your system:
 
 1. Install faster-whisper:
    ```bash
    python3 -m venv venv
-   venv/bin/pip install faster-whisper
+   venv/bin/pip install faster-whisper        # Linux/macOS
+   venv\Scripts\pip.exe install faster-whisper # Windows
    ```
 
 2. Copy `aisubs.lua` to your VLC extensions folder:
    - **Linux**: `~/.local/share/vlc/lua/extensions/`
    - **macOS**: `~/Library/Application Support/org.videolan.vlc/lua/extensions/`
+   - **Windows**: `%APPDATA%\vlc\lua\extensions\`
 
 3. Restart VLC.
 
 To update just the VLC extension without reinstalling Python deps:
 ```bash
-./setup.sh --install
+./setup.sh --install        # Linux/macOS
+setup.bat --install         # Windows
 ```
 
 ## License
