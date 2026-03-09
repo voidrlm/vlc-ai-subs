@@ -196,14 +196,27 @@ end
 
 function find_script()
     local home = get_home()
-    local candidates = {
-        -- Installed via setup.sh in common locations
-        home .. "/Desktop/aisubs/aisubs_whisper.py",
-        home .. "/.local/share/vlc-ai-subs/aisubs_whisper.py",
-        home .. "/vlc-ai-subs/aisubs_whisper.py",
-        "/opt/vlc-ai-subs/aisubs_whisper.py",
-        "/usr/local/share/vlc-ai-subs/aisubs_whisper.py",
-    }
+    local sep = package.config:sub(1, 1) or "/"  -- "/" on Unix, "\" on Windows
+    local is_win = (sep == "\\")
+
+    local candidates = {}
+
+    if is_win then
+        local appdata = os.getenv("APPDATA") or (home .. "\\AppData\\Roaming")
+        table.insert(candidates, home .. "\\Desktop\\vlc-ai-subs\\aisubs_whisper.py")
+        table.insert(candidates, home .. "\\Desktop\\aisubs\\aisubs_whisper.py")
+        table.insert(candidates, home .. "\\vlc-ai-subs\\aisubs_whisper.py")
+        table.insert(candidates, appdata .. "\\vlc-ai-subs\\aisubs_whisper.py")
+        table.insert(candidates, "C:\\vlc-ai-subs\\aisubs_whisper.py")
+    else
+        table.insert(candidates, home .. "/Desktop/vlc-ai-subs/aisubs_whisper.py")
+        table.insert(candidates, home .. "/Desktop/aisubs/aisubs_whisper.py")
+        table.insert(candidates, home .. "/vlc-ai-subs/aisubs_whisper.py")
+        table.insert(candidates, home .. "/.local/share/vlc-ai-subs/aisubs_whisper.py")
+        table.insert(candidates, "/opt/vlc-ai-subs/aisubs_whisper.py")
+        table.insert(candidates, "/usr/local/share/vlc-ai-subs/aisubs_whisper.py")
+    end
+
     for _, path in ipairs(candidates) do
         local f = io.open(path, "r")
         if f then
@@ -215,9 +228,19 @@ function find_script()
 end
 
 function find_python(script_dir)
-    -- Look for venv next to the script
-    local venv_py = script_dir .. "/venv/bin/python3"
+    local sep = package.config:sub(1, 1) or "/"
+
+    -- Unix venv
+    local venv_py = script_dir .. sep .. "venv" .. sep .. "bin" .. sep .. "python3"
     local f = io.open(venv_py, "r")
+    if f then
+        f:close()
+        return venv_py
+    end
+
+    -- Windows venv
+    venv_py = script_dir .. sep .. "venv" .. sep .. "Scripts" .. sep .. "python.exe"
+    f = io.open(venv_py, "r")
     if f then
         f:close()
         return venv_py
