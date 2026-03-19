@@ -129,29 +129,43 @@ def main():
     srt_lines = []
     count = 0
 
-    for seg in segments_iter:
-        count += 1
-        emit({
-            "type": "sub",
-            "i": count,
-            "start": round(seg["start"], 3),
-            "end": round(seg["end"], 3),
-            "text": seg["text"],
-        })
-        srt_lines.append(
-            f"{count}\n"
-            f"{format_srt_timestamp(seg['start'])} --> {format_srt_timestamp(seg['end'])}\n"
-            f"{seg['text']}\n"
-        )
+    try:
+        for seg in segments_iter:
+            count += 1
+            emit({
+                "type": "sub",
+                "i": count,
+                "start": round(seg["start"], 3),
+                "end": round(seg["end"], 3),
+                "text": seg["text"],
+            })
+            srt_lines.append(
+                f"{count}\n"
+                f"{format_srt_timestamp(seg['start'])} --> {format_srt_timestamp(seg['end'])}\n"
+                f"{seg['text']}\n"
+            )
+    except Exception as e:
+        import traceback
+        emit({"type": "error", "msg": f"Transcription failed: {e}\n{traceback.format_exc()}"})
+        sys.exit(1)
 
     # Write SRT file next to the media
     base, _ = os.path.splitext(media_path)
     srt_path = base + ".srt"
-    with open(srt_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(srt_lines))
+    try:
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(srt_lines))
+    except Exception as e:
+        emit({"type": "error", "msg": f"Could not write SRT: {e}"})
+        sys.exit(1)
 
     emit({"type": "done", "segments": count, "srt_path": srt_path})
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        emit({"type": "error", "msg": str(e) + "\n" + traceback.format_exc()})
+        sys.exit(1)
