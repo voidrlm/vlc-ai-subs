@@ -184,6 +184,17 @@ function get_media_path()
     path = string.gsub(path, "%%(%x%x)", function(hex)
         return string.char(tonumber(hex, 16))
     end)
+    -- On Windows, file:///C:/... becomes /C:/... after stripping file://
+    -- Remove the leading slash before the drive letter
+    if string.match(path, "^/[A-Za-z]:[/\\]") then
+        path = string.sub(path, 2)
+    end
+    -- Normalise forward slashes to backslashes on Windows
+    local sep = package.config:sub(1, 1)
+    if sep == "\\" then
+        path = string.gsub(path, "/", "\\")
+    end
+    vlc.msg.info("[AI Subs] media path: " .. path)
     return path, nil
 end
 
@@ -275,7 +286,8 @@ function start_generation()
         python, script, media_path, model, language, task
     )
 
-    vlc.msg.info("[AI Subs] " .. cmd)
+    vlc.msg.info("[AI Subs] cmd: " .. cmd)
+    set_status("Running: " .. python)
 
     if mode == "realtime" then
         run_realtime(cmd, model)
