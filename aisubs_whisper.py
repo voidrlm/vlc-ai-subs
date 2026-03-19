@@ -47,7 +47,7 @@ def transcribe_faster_whisper(media_path, model_name, lang, task):
     from faster_whisper import WhisperModel
 
     emit({"type": "status", "msg": f"Loading {model_name} model..."})
-    model = WhisperModel(model_name, compute_type="int8")
+    model = WhisperModel(model_name, device="cpu", compute_type="float32")
 
     emit({"type": "status", "msg": "Transcribing..."})
     segments_gen, _info = model.transcribe(
