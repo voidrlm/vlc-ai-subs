@@ -158,12 +158,9 @@ function get_home()
     local ok, home
     ok, home = pcall(function() return os.getenv("HOME") end)
     if ok and home and home ~= "" then return home end
-    local pipe = io.popen("echo $HOME")
-    if pipe then
-        home = pipe:read("*l")
-        pipe:close()
-        if home and home ~= "" then return home end
-    end
+    -- Windows: HOME is often unset; USERPROFILE is the standard equivalent
+    ok, home = pcall(function() return os.getenv("USERPROFILE") end)
+    if ok and home and home ~= "" then return home end
     return ""
 end
 
@@ -205,6 +202,7 @@ function find_script()
         local appdata = os.getenv("APPDATA") or (home .. "\\AppData\\Roaming")
         table.insert(candidates, home .. "\\Desktop\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\Desktop\\aisubs\\aisubs_whisper.py")
+        table.insert(candidates, home .. "\\Documents\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, appdata .. "\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, "C:\\vlc-ai-subs\\aisubs_whisper.py")
