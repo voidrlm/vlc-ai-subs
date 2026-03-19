@@ -4,11 +4,11 @@ vlc-ai-subs — VLC extension for AI-powered subtitle generation.
 Compatible with VLC 3.x and VLC 4.x.
 
 Two modes:
-  1. Real-time OSD  — subtitles appear on screen as Whisper transcribes
-  2. Generate & Load — full SRT is created first, then loaded synced to playback
+  1. Real-time OSD  — transcribes then shows subtitles via OSD
+  2. Generate & Load — full SRT is created then loaded synced to playback
 
 Requires: Python 3 + faster-whisper (or openai-whisper)
-Install:  Run setup.sh from the vlc-ai-subs project directory.
+Install:  Run setup.sh (Linux/macOS) or setup.bat (Windows).
 
 https://github.com/voidrlm/vlc-ai-subs
 ]]
@@ -16,7 +16,7 @@ https://github.com/voidrlm/vlc-ai-subs
 function descriptor()
     return {
         title = "AI Subs Generator",
-        version = "3.1",
+        version = "3.2",
         author = "voidrlm",
         url = "https://github.com/voidrlm/vlc-ai-subs",
         shortdesc = "AI subtitle generator (Whisper)",
@@ -27,13 +27,13 @@ function descriptor()
     }
 end
 
-local dlg = nil
+local dlg          = nil
 local model_dropdown = nil
-local lang_input = nil
+local lang_input   = nil
 local task_dropdown = nil
 local mode_dropdown = nil
 local status_label = nil
-local osd_channel = nil
+local osd_channel  = nil
 
 ----------------------------------------------------------------
 -- Lifecycle
@@ -43,13 +43,8 @@ function activate()   create_dialog() end
 function deactivate() if dlg then dlg:delete(); dlg = nil end end
 function close()      deactivate() end
 
-function menu()
-    return {"Generate Subtitles"}
-end
-
-function trigger_menu(id)
-    if id == 1 then create_dialog() end
-end
+function menu() return {"Generate Subtitles"} end
+function trigger_menu(id) if id == 1 then create_dialog() end end
 
 ----------------------------------------------------------------
 -- Dialog
@@ -57,7 +52,6 @@ end
 
 function create_dialog()
     if dlg then dlg:delete() end
-
     dlg = vlc.dialog("AI Subs Generator")
 
     dlg:add_label("Mode:", 1, 1, 1, 1)
@@ -82,11 +76,7 @@ function create_dialog()
     task_dropdown:add_value("Translate to English", 2)
 
     dlg:add_button("Generate", start_generation, 1, 5, 3, 1)
-
-    status_label = dlg:add_label(
-        "Ready. Play a media file and click Generate.", 1, 6, 3, 1
-    )
-
+    status_label = dlg:add_label("Ready. Play a media file and click Generate.", 1, 6, 3, 1)
     dlg:show()
 end
 
@@ -138,8 +128,7 @@ function add_subtitle_track(srt_path)
 end
 
 function register_osd()
-    local ok, ch
-    ok, ch = pcall(function() return vlc.osd.channel_register() end)
+    local ok, ch = pcall(function() return vlc.osd.channel_register() end)
     if ok and ch then return ch end
     return 1
 end
@@ -154,14 +143,29 @@ function show_osd(text, duration)
     end
 end
 
+----------------------------------------------------------------
+-- Path helpers
+----------------------------------------------------------------
+
+function is_windows()
+    return package.config:sub(1, 1) == "\\"
+end
+
 function get_home()
-    local ok, home
-    ok, home = pcall(function() return os.getenv("HOME") end)
-    if ok and home and home ~= "" then return home end
-    -- Windows: HOME is often unset; USERPROFILE is the standard equivalent
-    ok, home = pcall(function() return os.getenv("USERPROFILE") end)
-    if ok and home and home ~= "" then return home end
-    return ""
+    -- USERPROFILE is the standard Windows home directory variable
+    local home = os.getenv("USERPROFILE") or os.getenv("HOME") or ""
+    return home
+end
+
+function get_temp_file()
+    local tmp
+    if is_windows() then
+        tmp = os.getenv("TEMP") or os.getenv("TMP") or (get_home() .. "\\AppData\\Local\\Temp")
+        return tmp .. "\\aisubs_" .. os.time() .. ".txt"
+    else
+        tmp = os.getenv("TMPDIR") or "/tmp"
+        return tmp .. "/aisubs_" .. os.time() .. ".txt"
+    end
 end
 
 ----------------------------------------------------------------
@@ -170,30 +174,26 @@ end
 
 function get_media_path()
     local item = get_input_item()
-    if not item then
-        return nil, "No media is currently playing."
-    end
+    if not item then return nil, "No media is currently playing." end
     local uri = item:uri()
-    if not uri then
-        return nil, "Cannot get media URI."
-    end
-    if not string.find(uri, "^file://") then
-        return nil, "Only local files are supported."
-    end
+    if not uri then return nil, "Cannot get media URI." end
+    if not string.find(uri, "^file://") then return nil, "Only local files are supported." end
+
+    -- Strip file:// prefix
     local path = string.gsub(uri, "^file://", "")
+
+    -- URL-decode percent-encoded characters
     path = string.gsub(path, "%%(%x%x)", function(hex)
         return string.char(tonumber(hex, 16))
     end)
-    -- On Windows, file:///C:/... becomes /C:/... after stripping file://
+
+    -- On Windows, VLC produces file:///C:/path → after strip → /C:/path
     -- Remove the leading slash before the drive letter
-    if string.match(path, "^/[A-Za-z]:[/\\]") then
-        path = string.sub(path, 2)
-    end
-    -- Normalise forward slashes to backslashes on Windows
-    local sep = package.config:sub(1, 1)
-    if sep == "\\" then
+    if is_windows() then
+        path = string.gsub(path, "^/([A-Za-z]:)", "%1")
         path = string.gsub(path, "/", "\\")
     end
+
     vlc.msg.info("[AI Subs] media path: " .. path)
     return path, nil
 end
@@ -204,16 +204,13 @@ end
 
 function find_script()
     local home = get_home()
-    local sep = package.config:sub(1, 1) or "/"  -- "/" on Unix, "\" on Windows
-    local is_win = (sep == "\\")
-
     local candidates = {}
 
-    if is_win then
+    if is_windows() then
         local appdata = os.getenv("APPDATA") or (home .. "\\AppData\\Roaming")
+        table.insert(candidates, home .. "\\Documents\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\Desktop\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\Desktop\\aisubs\\aisubs_whisper.py")
-        table.insert(candidates, home .. "\\Documents\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, appdata .. "\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, "C:\\vlc-ai-subs\\aisubs_whisper.py")
@@ -228,33 +225,25 @@ function find_script()
 
     for _, path in ipairs(candidates) do
         local f = io.open(path, "r")
-        if f then
-            f:close()
-            return path
-        end
+        if f then f:close(); return path end
     end
     return nil
 end
 
 function find_python(script_dir)
-    local sep = package.config:sub(1, 1) or "/"
+    local sep = is_windows() and "\\" or "/"
 
-    -- Unix venv
-    local venv_py = script_dir .. sep .. "venv" .. sep .. "bin" .. sep .. "python3"
-    local f = io.open(venv_py, "r")
-    if f then
-        f:close()
-        return venv_py
-    end
+    -- venv on Unix
+    local p = script_dir .. sep .. "venv" .. sep .. "bin" .. sep .. "python3"
+    local f = io.open(p, "r")
+    if f then f:close(); return p end
 
-    -- Windows venv
-    venv_py = script_dir .. sep .. "venv" .. sep .. "Scripts" .. sep .. "python.exe"
-    f = io.open(venv_py, "r")
-    if f then
-        f:close()
-        return venv_py
-    end
-    return "python3"
+    -- venv on Windows
+    p = script_dir .. sep .. "venv" .. sep .. "Scripts" .. sep .. "python.exe"
+    f = io.open(p, "r")
+    if f then f:close(); return p end
+
+    return is_windows() and "python" or "python3"
 end
 
 ----------------------------------------------------------------
@@ -275,118 +264,128 @@ function start_generation()
     end
 
     local script_dir = string.match(script, "(.+)[/\\][^/\\]+$") or "."
-    local python = find_python(script_dir)
-    local model = get_model_name()
-    local language = lang_input:get_text() or "auto"
-    local task = get_task()
-    local mode = get_mode()
+    local python    = find_python(script_dir)
+    local model     = get_model_name()
+    local language  = lang_input:get_text() or "auto"
+    local task      = get_task()
+    local mode      = get_mode()
+    local tmp_file  = get_temp_file()
 
-    local cmd = string.format(
-        '"%s" "%s" "%s" "%s" "%s" "%s" 2>&1',
-        python, script, media_path, model, language, task
-    )
-
-    vlc.msg.info("[AI Subs] cmd: " .. cmd)
-    set_status("Running: " .. python)
-
-    if mode == "realtime" then
-        run_realtime(cmd, model)
+    -- Build the command.  On Windows we write a .bat file and run that —
+    -- this avoids cmd /c quoting issues entirely.
+    local cmd
+    if is_windows() then
+        local bat_file = string.gsub(tmp_file, "%.txt$", ".bat")
+        local bf = io.open(bat_file, "w")
+        if not bf then
+            set_status("Error: cannot write bat file: " .. bat_file)
+            return
+        end
+        bf:write('@echo off\n')
+        bf:write(string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"\n',
+            python, script, media_path, model, language, task, tmp_file))
+        bf:close()
+        cmd = '"' .. bat_file .. '"'
     else
-        run_generate_and_load(cmd, model)
+        cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
+            python, script, media_path, model, language, task, tmp_file)
     end
-end
 
-----------------------------------------------------------------
--- Mode 1: Real-time OSD
-----------------------------------------------------------------
+    vlc.msg.info("[AI Subs] python: " .. python)
+    vlc.msg.info("[AI Subs] media:  " .. media_path)
+    vlc.msg.info("[AI Subs] tmp:    " .. tmp_file)
 
-function run_realtime(cmd, model)
-    set_status("Real-time mode (" .. model .. ")...")
-    osd_channel = register_osd()
+    -- Step 1: confirm Lua can write to the tmp path
+    local test_f = io.open(tmp_file, "w")
+    if not test_f then
+        set_status("Error: cannot write to temp dir: " .. tmp_file)
+        return
+    end
+    test_f:write("init\n")
+    test_f:close()
 
+    -- Step 2: launch Python
+    set_status("Launching Python...")
     local pipe = io.popen(cmd)
     if not pipe then
-        set_status("Error: failed to start Whisper.")
+        set_status("Error: io.popen failed (pipe is nil). cmd: " .. cmd)
         return
     end
 
-    local seg_count = 0
-    local srt_path = nil
+    -- Step 3: drain stdout and wait for Python to exit
+    set_status("Transcribing with " .. model .. "... please wait")
+    local stdout_data = pipe:read("*a")
+    pipe:close()
 
-    for line in pipe:lines() do
+    vlc.msg.info("[AI Subs] stdout len: " .. tostring(#(stdout_data or "")))
+
+    -- Step 4: if tmp_file is still just "init\n", Python didn't write to it
+    local check_f = io.open(tmp_file, "r")
+    if check_f then
+        local first = check_f:read("*l")
+        check_f:close()
+        if first == "init" then
+            -- Python didn't write anything — show stdout for clues
+            local excerpt = string.sub(stdout_data or "", 1, 200)
+            set_status("Error: Python produced no output. stdout: [" .. excerpt .. "]")
+            return
+        end
+    end
+
+    process_results(tmp_file, mode)
+end
+
+----------------------------------------------------------------
+-- Process results from temp file
+----------------------------------------------------------------
+
+function process_results(tmp_file, mode)
+    local f = io.open(tmp_file, "r")
+    if not f then
+        set_status("Error: Whisper produced no output. Check VLC logs.")
+        return
+    end
+
+    local srt_path  = nil
+    local seg_count = 0
+
+    for line in f:lines() do
         local d = parse_json(line)
         if d then
-            if d.type == "status" then
-                set_status(d.msg or "Working...")
+            if d.type == "error" then
+                set_status("Error: " .. (d.msg or "unknown"))
+                f:close()
+                pcall(function() os.remove(tmp_file) end)
+                return
             elseif d.type == "sub" then
                 seg_count = seg_count + 1
-                set_status("Real-time: " .. seg_count .. " segments")
-                local dur = 3000000
-                if d.start and d["end"] then
-                    dur = math.max((d["end"] - d.start) * 1000000, 1500000)
+                if mode == "realtime" then
+                    local dur = 3000000
+                    if d.start and d["end"] then
+                        dur = math.max((d["end"] - d.start) * 1000000, 1500000)
+                    end
+                    osd_channel = osd_channel or register_osd()
+                    show_osd(d.text, dur)
                 end
-                show_osd(d.text, dur)
             elseif d.type == "done" then
-                srt_path = d.srt_path
+                srt_path  = d.srt_path
                 seg_count = d.segments or seg_count
-            elseif d.type == "error" then
-                set_status("Error: " .. (d.msg or "unknown"))
-                pipe:close()
-                return
             end
         end
     end
-    pipe:close()
+    f:close()
+    pcall(function() os.remove(tmp_file) end)
 
-    if srt_path then
-        load_subtitle(srt_path)
-        set_status("Done! " .. seg_count .. " segments. SRT saved: " .. srt_path)
-    else
-        set_status("Done! " .. seg_count .. " segments.")
-    end
-end
-
-----------------------------------------------------------------
--- Mode 2: Generate & Load SRT
-----------------------------------------------------------------
-
-function run_generate_and_load(cmd, model)
-    set_status("Generating subtitles (" .. model .. ")... please wait")
-
-    local pipe = io.popen(cmd)
-    if not pipe then
-        set_status("Error: failed to start Whisper.")
+    if not srt_path then
+        set_status("Error: transcription failed. Check VLC logs for details.")
         return
     end
 
-    local seg_count = 0
-    local srt_path = nil
-
-    for line in pipe:lines() do
-        local d = parse_json(line)
-        if d then
-            if d.type == "status" then
-                set_status(d.msg or "Working...")
-            elseif d.type == "sub" then
-                seg_count = seg_count + 1
-                set_status("Transcribing... " .. seg_count .. " segments")
-            elseif d.type == "done" then
-                srt_path = d.srt_path
-                seg_count = d.segments or seg_count
-            elseif d.type == "error" then
-                set_status("Error: " .. (d.msg or "unknown"))
-                pipe:close()
-                return
-            end
-        end
-    end
-    pipe:close()
-
-    if srt_path then
+    if mode == "srt" then
         load_subtitle(srt_path)
         set_status("Done! " .. seg_count .. " segments. Subtitles loaded.")
     else
-        set_status("Done! " .. seg_count .. " segments (no SRT created).")
+        set_status("Done! " .. seg_count .. " segments. SRT: " .. srt_path)
     end
 end
 
@@ -422,8 +421,8 @@ function parse_json(str)
         v = string.gsub(v, "\\\\", "\\")
         r[k] = v
     end
-    for k, v in string.gmatch(j, '"([^"]+)"%s*:%s*([%d%.]+)') do
-        r[k] = tonumber(v)
+    for k, v in string.gmatch(j, '"([^"]+)"%s*:%s*([%d%.%-]+)') do
+        if not r[k] then r[k] = tonumber(v) end
     end
     return r
 end
