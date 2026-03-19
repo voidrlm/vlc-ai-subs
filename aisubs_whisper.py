@@ -37,9 +37,18 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+_out_file = None  # optional output file set in main()
+
 def emit(data: dict) -> None:
-    """Write a JSON line to stdout and flush immediately."""
-    print(json.dumps(data, ensure_ascii=False), flush=True)
+    """Write a JSON line to stdout and to the output file if set."""
+    line = json.dumps(data, ensure_ascii=False)
+    print(line, flush=True)
+    if _out_file:
+        try:
+            _out_file.write(line + "\n")
+            _out_file.flush()
+        except Exception:
+            pass
 
 
 def transcribe_faster_whisper(media_path, model_name, lang, task):
@@ -90,14 +99,23 @@ def transcribe_openai_whisper(media_path, model_name, lang, task):
 
 
 def main():
+    global _out_file
+
     if len(sys.argv) < 5:
-        emit({"type": "error", "msg": "Usage: aisubs_whisper.py <media> <model> <lang> <task>"})
+        emit({"type": "error", "msg": "Usage: aisubs_whisper.py <media> <model> <lang> <task> [out_file]"})
         sys.exit(1)
 
     media_path = sys.argv[1]
     model_name = sys.argv[2]
     language = sys.argv[3] if sys.argv[3] != "auto" else None
     task = sys.argv[4]
+
+    # Optional output file — Lua passes this so output is captured without shell redirection
+    if len(sys.argv) > 5:
+        try:
+            _out_file = open(sys.argv[5], "w", encoding="utf-8", buffering=1)
+        except Exception as e:
+            pass  # if we can't open it, stdout-only mode
 
     if not os.path.isfile(media_path):
         emit({"type": "error", "msg": f"File not found: {media_path}"})
@@ -161,6 +179,9 @@ def main():
 
     emit({"type": "done", "segments": count, "srt_path": srt_path})
 
+    if _out_file:
+        _out_file.close()
+
 
 if __name__ == "__main__":
     try:
@@ -168,4 +189,6 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         emit({"type": "error", "msg": str(e) + "\n" + traceback.format_exc()})
+        if _out_file:
+            _out_file.close()
         sys.exit(1)
