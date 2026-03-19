@@ -26,13 +26,15 @@ install_to() {
     local dir="$1"
     local needs_sudo="${2:-false}"
 
-    if [ -d "$dir" ]; then
-        if [ "$needs_sudo" = "true" ]; then
+    if [ "$needs_sudo" = "true" ]; then
+        # System paths: only install if directory already exists (avoid sudo mkdir)
+        if [ -d "$dir" ]; then
             sudo cp "$SRC" "$dir/aisubs.lua" 2>/dev/null && ok "$dir" && INSTALLED=1
-        else
-            mkdir -p "$dir"
-            cp "$SRC" "$dir/aisubs.lua" && ok "$dir" && INSTALLED=1
         fi
+    else
+        # User paths: create directory if needed, then install
+        mkdir -p "$dir" 2>/dev/null || return
+        cp "$SRC" "$dir/aisubs.lua" && ok "$dir" && INSTALLED=1
     fi
 }
 
