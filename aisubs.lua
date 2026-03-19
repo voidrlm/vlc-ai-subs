@@ -263,7 +263,7 @@ function start_generation()
         return
     end
 
-    local script_dir = string.match(script, "(.+)/[^/]+$") or "."
+    local script_dir = string.match(script, "(.+)[/\\][^/\\]+$") or "."
     local python = find_python(script_dir)
     local model = get_model_name()
     local language = lang_input:get_text() or "auto"
