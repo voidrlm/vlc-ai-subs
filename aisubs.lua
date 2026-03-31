@@ -275,17 +275,22 @@ function start_generation()
     -- this avoids cmd /c quoting issues entirely.
     local cmd
     if is_windows() then
-        local bat_file = string.gsub(tmp_file, "%.txt$", ".bat")
-        local bf = io.open(bat_file, "w")
-        if not bf then
-            set_status("Error: cannot write bat file: " .. bat_file)
+        -- Use a VBScript launcher so no console window appears.
+        -- wscript.exe has no console; WScript.Shell.Run with windowStyle=0 hides Python too.
+        local vbs_file = string.gsub(tmp_file, "%.txt$", ".vbs")
+        local vf = io.open(vbs_file, "w")
+        if not vf then
+            set_status("Error: cannot write helper file: " .. vbs_file)
             return
         end
-        bf:write('@echo off\n')
-        bf:write(string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"\n',
-            python, script, media_path, model, language, task, tmp_file))
-        bf:close()
-        cmd = '"' .. bat_file .. '"'
+        -- In VBScript string literals, a literal double-quote is written as ""
+        local raw_cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
+            python, script, media_path, model, language, task, tmp_file)
+        local vbs_cmd = raw_cmd:gsub('"', '""')
+        vf:write('Set sh = CreateObject("WScript.Shell")\n')
+        vf:write('sh.Run "' .. vbs_cmd .. '", 0, True\n')
+        vf:close()
+        cmd = 'wscript.exe /nologo "' .. vbs_file .. '"'
     else
         cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
             python, script, media_path, model, language, task, tmp_file)
@@ -325,9 +330,10 @@ function start_generation()
         local first = check_f:read("*l")
         check_f:close()
         if first == "init" then
-            -- Python didn't write anything — show stdout for clues
+            -- Python didn't write anything — check VLC log for details
             local excerpt = string.sub(stdout_data or "", 1, 200)
-            set_status("Error: Python produced no output. stdout: [" .. excerpt .. "]")
+            local hint = (#excerpt > 0) and (" stdout: [" .. excerpt .. "]") or " Check VLC log for details."
+            set_status("Error: Python produced no output." .. hint)
             return
         end
     end
