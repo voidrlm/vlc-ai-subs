@@ -35,6 +35,14 @@ local mode_dropdown = nil
 local status_label = nil
 local osd_channel  = nil
 
+-- Polling state (set by start_generation, used by poll_progress)
+local _poll_tmp   = nil
+local _poll_mode  = nil
+local _poll_model = nil
+local _poll_tmr   = nil
+local _poll_secs  = 0
+local POLL_US     = 3000000  -- poll every 3 seconds
+
 ----------------------------------------------------------------
 -- Lifecycle
 ----------------------------------------------------------------
@@ -251,6 +259,12 @@ end
 ----------------------------------------------------------------
 
 function start_generation()
+    -- Cancel any in-progress transcription
+    if _poll_tmr then
+        pcall(function() _poll_tmr:cancel() end)
+        _poll_tmr = nil
+    end
+
     local media_path, err = get_media_path()
     if not media_path then
         set_status("Error: " .. err)
@@ -271,36 +285,7 @@ function start_generation()
     local mode      = get_mode()
     local tmp_file  = get_temp_file()
 
-    -- Build the command.  On Windows we write a .bat file and run that —
-    -- this avoids cmd /c quoting issues entirely.
-    local cmd
-    if is_windows() then
-        -- Use a VBScript launcher so no console window appears.
-        -- wscript.exe has no console; WScript.Shell.Run with windowStyle=0 hides Python too.
-        local vbs_file = string.gsub(tmp_file, "%.txt$", ".vbs")
-        local vf = io.open(vbs_file, "w")
-        if not vf then
-            set_status("Error: cannot write helper file: " .. vbs_file)
-            return
-        end
-        -- In VBScript string literals, a literal double-quote is written as ""
-        local raw_cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
-            python, script, media_path, model, language, task, tmp_file)
-        local vbs_cmd = raw_cmd:gsub('"', '""')
-        vf:write('Set sh = CreateObject("WScript.Shell")\n')
-        vf:write('sh.Run "' .. vbs_cmd .. '", 0, True\n')
-        vf:close()
-        cmd = 'wscript.exe /nologo "' .. vbs_file .. '"'
-    else
-        cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
-            python, script, media_path, model, language, task, tmp_file)
-    end
-
-    vlc.msg.info("[AI Subs] python: " .. python)
-    vlc.msg.info("[AI Subs] media:  " .. media_path)
-    vlc.msg.info("[AI Subs] tmp:    " .. tmp_file)
-
-    -- Step 1: confirm Lua can write to the tmp path
+    -- Write sentinel so we can detect if Python started writing
     local test_f = io.open(tmp_file, "w")
     if not test_f then
         set_status("Error: cannot write to temp dir: " .. tmp_file)
@@ -309,36 +294,88 @@ function start_generation()
     test_f:write("init\n")
     test_f:close()
 
-    -- Step 2: launch Python
-    set_status("Launching Python...")
+    -- Build and launch command NON-BLOCKING so VLC's thread is not frozen.
+    -- Windows: VBScript with bWaitOnReturn=False → wscript exits immediately.
+    -- Unix:    trailing & → shell forks Python and exits immediately.
+    -- In both cases io.popen returns at once and we poll tmp_file via vlc.timer.
+    local cmd
+    if is_windows() then
+        local vbs_file = string.gsub(tmp_file, "%.txt$", ".vbs")
+        local vf = io.open(vbs_file, "w")
+        if not vf then
+            set_status("Error: cannot write helper file: " .. vbs_file)
+            return
+        end
+        -- In VBScript string literals a literal double-quote is written as ""
+        local raw_cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
+            python, script, media_path, model, language, task, tmp_file)
+        local vbs_cmd = raw_cmd:gsub('"', '""')
+        vf:write('Set sh = CreateObject("WScript.Shell")\n')
+        vf:write('sh.Run "' .. vbs_cmd .. '", 0, False\n')  -- 0=hidden, False=don't wait
+        vf:close()
+        cmd = 'wscript.exe /nologo "' .. vbs_file .. '"'
+    else
+        cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s" &',
+            python, script, media_path, model, language, task, tmp_file)
+    end
+
+    vlc.msg.info("[AI Subs] python: " .. python)
+    vlc.msg.info("[AI Subs] media:  " .. media_path)
+    vlc.msg.info("[AI Subs] tmp:    " .. tmp_file)
+
     local pipe = io.popen(cmd)
     if not pipe then
-        set_status("Error: io.popen failed (pipe is nil). cmd: " .. cmd)
+        set_status("Error: failed to launch Python. Check VLC logs.")
+        return
+    end
+    pipe:read("*a")  -- returns immediately (process is backgrounded)
+    pipe:close()
+
+    -- Poll tmp_file every 3 s; VLC's thread stays free the whole time
+    _poll_tmp   = tmp_file
+    _poll_mode  = mode
+    _poll_model = model
+    _poll_secs  = 0
+    set_status("Transcribing with " .. model .. "... please wait")
+    _poll_tmr = vlc.timer(poll_progress)
+    _poll_tmr:schedule(POLL_US)
+end
+
+----------------------------------------------------------------
+-- Polling callback — called by vlc.timer every POLL_US microseconds
+----------------------------------------------------------------
+
+function poll_progress()
+    _poll_secs = _poll_secs + (POLL_US / 1000000)
+
+    local f = io.open(_poll_tmp, "r")
+    if not f then
+        -- Temp file gone — shouldn't happen; keep waiting
+        set_status(string.format("Transcribing with %s... %ds", _poll_model, _poll_secs))
+        _poll_tmr:schedule(POLL_US)
         return
     end
 
-    -- Step 3: drain stdout and wait for Python to exit
-    set_status("Transcribing with " .. model .. "... please wait")
-    local stdout_data = pipe:read("*a")
-    pipe:close()
+    local last_line = nil
+    for line in f:lines() do last_line = line end
+    f:close()
 
-    vlc.msg.info("[AI Subs] stdout len: " .. tostring(#(stdout_data or "")))
-
-    -- Step 4: if tmp_file is still just "init\n", Python didn't write to it
-    local check_f = io.open(tmp_file, "r")
-    if check_f then
-        local first = check_f:read("*l")
-        check_f:close()
-        if first == "init" then
-            -- Python didn't write anything — check VLC log for details
-            local excerpt = string.sub(stdout_data or "", 1, 200)
-            local hint = (#excerpt > 0) and (" stdout: [" .. excerpt .. "]") or " Check VLC log for details."
-            set_status("Error: Python produced no output." .. hint)
-            return
-        end
+    if not last_line or last_line == "init" then
+        -- Python hasn't written output yet
+        set_status(string.format("Loading model / starting... %ds", _poll_secs))
+        _poll_tmr:schedule(POLL_US)
+        return
     end
 
-    process_results(tmp_file, mode)
+    local d = parse_json(last_line)
+    if d and (d.type == "done" or d.type == "error") then
+        -- Python finished — process results
+        _poll_tmr = nil
+        process_results(_poll_tmp, _poll_mode)
+    else
+        set_status(string.format("Transcribing with %s... %ds", _poll_model, _poll_secs))
+        _poll_tmr:schedule(POLL_US)
+    end
 end
 
 ----------------------------------------------------------------
