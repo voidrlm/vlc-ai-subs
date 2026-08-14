@@ -42,7 +42,13 @@ _out_file = None  # optional output file set in main()
 def emit(data: dict) -> None:
     """Write a JSON line to stdout and to the output file if set."""
     line = json.dumps(data, ensure_ascii=False)
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except Exception:
+        # Launched hidden from VLC there may be no usable stdout, and a legacy
+        # console codepage cannot encode non-ASCII text. Never let that kill
+        # the run: the output file below is what the extension actually reads.
+        pass
     if _out_file:
         try:
             _out_file.write(line + "\n")
@@ -98,43 +104,88 @@ def transcribe_openai_whisper(media_path, model_name, lang, task):
             yield {"start": seg["start"], "end": seg["end"], "text": text}
 
 
+def read_job_file(path):
+    """Read arguments from a UTF-8 job file, one value per line.
+
+    The Windows launcher cannot pass non-ASCII paths on the command line: the
+    .vbs helper it writes is read back by wscript in the ANSI codepage, which
+    corrupts UTF-8 bytes. Routing arguments through this file keeps them intact.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        values = [line.rstrip("\r\n") for line in f]
+    while len(values) < 5:
+        values.append("")
+    return values[:5]
+
+
 def main():
     global _out_file
 
-    if len(sys.argv) < 5:
-        emit({"type": "error", "msg": "Usage: aisubs_whisper.py <media> <model> <lang> <task> [out_file]"})
+    if len(sys.argv) >= 3 and sys.argv[1] == "--job":
+        try:
+            media_path, model_name, language, task, out_path = read_job_file(sys.argv[2])
+        except Exception as e:
+            emit({"type": "error", "msg": f"Cannot read job file {sys.argv[2]}: {e}"})
+            sys.exit(1)
+    elif len(sys.argv) >= 5:
+        media_path = sys.argv[1]
+        model_name = sys.argv[2]
+        language = sys.argv[3]
+        task = sys.argv[4]
+        # Optional output file — passed so output is captured without redirection
+        out_path = sys.argv[5] if len(sys.argv) > 5 else None
+    else:
+        emit({"type": "error", "msg": "Usage: aisubs_whisper.py <media> <model> <lang> <task> [out_file]  |  --job <file>"})
         sys.exit(1)
 
-    media_path = sys.argv[1]
-    model_name = sys.argv[2]
-    language = sys.argv[3] if sys.argv[3] != "auto" else None
-    task = sys.argv[4]
+    if language == "auto":
+        language = None
 
-    # Optional output file — Lua passes this so output is captured without shell redirection
-    if len(sys.argv) > 5:
+    if out_path:
+        # The Windows launcher starts this process hidden and without a console,
+        # so the inherited stdout/stderr are dead handles: the first print() or
+        # traceback would raise OSError and kill the run silently, leaving an
+        # empty output file behind. Point both streams at a log file up front so
+        # nothing can write into the void - and so crashes stay diagnosable.
         try:
-            _out_file = open(sys.argv[5], "w", encoding="utf-8", buffering=1)
-        except Exception as e:
+            log = open(out_path + ".log", "w", encoding="utf-8", buffering=1)
+            sys.stdout = log
+            sys.stderr = log
+        except Exception:
+            pass
+
+        try:
+            _out_file = open(out_path, "w", encoding="utf-8", buffering=1)
+        except Exception:
             pass  # if we can't open it, stdout-only mode
+
+    # Written before any heavy import so a crash while loading the backend can
+    # be told apart from the process never starting at all.
+    emit({"type": "status", "msg": "Starting..."})
 
     if not os.path.isfile(media_path):
         emit({"type": "error", "msg": f"File not found: {media_path}"})
         sys.exit(1)
 
-    # Detect backend
+    # Detect backend. Catch Exception rather than ImportError: a broken native
+    # dependency (ctranslate2 / onnxruntime DLLs) can surface as OSError, and
+    # swallowing that would report a misleading "no backend found" instead.
+    emit({"type": "status", "msg": "Loading backend..."})
     backend = None
+    first_error = None
     try:
         import faster_whisper  # noqa: F401
         backend = "faster-whisper"
-    except ImportError:
-        pass
+    except Exception as e:
+        first_error = f"{type(e).__name__}: {e}"
 
     if not backend:
         try:
             import whisper  # noqa: F401
             backend = "openai-whisper"
-        except ImportError:
-            emit({"type": "error", "msg": "No Whisper backend found. Run: pip install faster-whisper"})
+        except Exception as e:
+            emit({"type": "error", "msg":
+                  f"No Whisper backend available.\nfaster-whisper: {first_error}\nopenai-whisper: {type(e).__name__}: {e}"})
             sys.exit(1)
 
     # Choose transcription function

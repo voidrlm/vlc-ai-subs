@@ -1,0 +1,10 @@
+# cmd.exe parses batch files by byte offset. LF-only line endings corrupt that
+# parsing, so .bat must always be checked out with CRLF regardless of platform.
+*.bat text eol=crlf
+
+# Shell scripts must stay LF or /bin/sh chokes on the carriage returns.
+*.sh text eol=lf
+
+*.lua text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf

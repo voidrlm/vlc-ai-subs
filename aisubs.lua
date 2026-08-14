@@ -195,10 +195,17 @@ function get_media_path()
         return string.char(tonumber(hex, 16))
     end)
 
-    -- On Windows, VLC produces file:///C:/path → after strip → /C:/path
-    -- Remove the leading slash before the drive letter
+    -- On Windows VLC produces two shapes:
+    --   local file    file:///C:/dir/x.mkv     -> after strip: /C:/dir/x.mkv
+    --   network share file://host/share/x.mkv  -> after strip: host/share/x.mkv
+    -- The share form has no leading slash, so the UNC "\\" must be restored;
+    -- without it the path stays relative and Whisper reports "File not found".
     if is_windows() then
-        path = string.gsub(path, "^/([A-Za-z]:)", "%1")
+        if string.match(path, "^/[A-Za-z]:") then
+            path = string.gsub(path, "^/", "")
+        elseif not string.match(path, "^[A-Za-z]:") then
+            path = "//" .. path
+        end
         path = string.gsub(path, "/", "\\")
     end
 
@@ -214,8 +221,17 @@ function find_script()
     local home = get_home()
     local candidates = {}
 
+    -- Explicit override: point AISUBS_DIR at the checkout if it lives somewhere
+    -- outside the well-known locations below.
+    local override = os.getenv("AISUBS_DIR")
+    if override and override ~= "" then
+        local sep = is_windows() and "\\" or "/"
+        table.insert(candidates, override .. sep .. "aisubs_whisper.py")
+    end
+
     if is_windows() then
         local appdata = os.getenv("APPDATA") or (home .. "\\AppData\\Roaming")
+        table.insert(candidates, home .. "\\Downloads\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\Documents\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\Desktop\\vlc-ai-subs\\aisubs_whisper.py")
         table.insert(candidates, home .. "\\Desktop\\aisubs\\aisubs_whisper.py")
@@ -294,6 +310,20 @@ function start_generation()
     test_f:write("init\n")
     test_f:close()
 
+    -- Arguments travel through a UTF-8 job file rather than the command line.
+    -- wscript reads the .vbs helper back as ANSI, so a media path containing
+    -- non-ASCII characters (umlauts, en dashes, ...) would be corrupted there
+    -- and Whisper would report "File not found". Keeping the .vbs pure ASCII
+    -- and putting the real paths in this file avoids the whole problem.
+    local job_file = string.gsub(tmp_file, "%.txt$", ".job")
+    local jf = io.open(job_file, "w")
+    if not jf then
+        set_status("Error: cannot write job file: " .. job_file)
+        return
+    end
+    jf:write(media_path .. "\n" .. model .. "\n" .. language .. "\n" .. task .. "\n" .. tmp_file .. "\n")
+    jf:close()
+
     -- Build and launch command NON-BLOCKING so VLC's thread is not frozen.
     -- Windows: VBScript with bWaitOnReturn=False → wscript exits immediately.
     -- Unix:    trailing & → shell forks Python and exits immediately.
@@ -307,16 +337,14 @@ function start_generation()
             return
         end
         -- In VBScript string literals a literal double-quote is written as ""
-        local raw_cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
-            python, script, media_path, model, language, task, tmp_file)
+        local raw_cmd = string.format('"%s" -u "%s" --job "%s"', python, script, job_file)
         local vbs_cmd = raw_cmd:gsub('"', '""')
         vf:write('Set sh = CreateObject("WScript.Shell")\n')
         vf:write('sh.Run "' .. vbs_cmd .. '", 0, False\n')  -- 0=hidden, False=don't wait
         vf:close()
         cmd = 'wscript.exe /nologo "' .. vbs_file .. '"'
     else
-        cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s" &',
-            python, script, media_path, model, language, task, tmp_file)
+        cmd = string.format('"%s" -u "%s" --job "%s" &', python, script, job_file)
     end
 
     vlc.msg.info("[AI Subs] python: " .. python)
@@ -382,6 +410,15 @@ end
 -- Process results from temp file
 ----------------------------------------------------------------
 
+-- Remove the run's scratch files: the JSON stream plus the .job/.vbs/.log
+-- siblings derived from it. Without this they accumulate in the temp dir.
+function cleanup_run_files(tmp_file)
+    local base = string.gsub(tmp_file, "%.txt$", "")
+    for _, p in ipairs({tmp_file, base .. ".job", base .. ".vbs", tmp_file .. ".log"}) do
+        pcall(function() os.remove(p) end)
+    end
+end
+
 function process_results(tmp_file, mode)
     local f = io.open(tmp_file, "r")
     if not f then
@@ -398,7 +435,7 @@ function process_results(tmp_file, mode)
             if d.type == "error" then
                 set_status("Error: " .. (d.msg or "unknown"))
                 f:close()
-                pcall(function() os.remove(tmp_file) end)
+                cleanup_run_files(tmp_file)
                 return
             elseif d.type == "sub" then
                 seg_count = seg_count + 1
@@ -417,7 +454,7 @@ function process_results(tmp_file, mode)
         end
     end
     f:close()
-    pcall(function() os.remove(tmp_file) end)
+    cleanup_run_files(tmp_file)
 
     if not srt_path then
         set_status("Error: transcription failed. Check VLC logs for details.")
