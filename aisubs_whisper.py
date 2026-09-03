@@ -27,6 +27,7 @@ Output (stdout) — one JSON object per line
 import os
 import sys
 import time
+import traceback
 
 from core.emitter import Emitter
 from core.srt import write_srt
@@ -184,7 +185,6 @@ def main():
                 **segment,
             })
     except Exception as exc:
-        import traceback
         emitter.emit({
             "type": "error",
             "msg": f"Transcription failed: {exc}\n{traceback.format_exc()}",
@@ -237,7 +237,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        import traceback
         try:
             print(
                 '{"type": "error", "msg": "%s"}' % str(exc).replace('"', '\\"'),

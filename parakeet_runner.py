@@ -20,6 +20,8 @@ The SRT file is written ONLY when [srt_path] is given — the plugin's caller
 (aisubs_whisper.py) owns SRT output, so the runner never creates side-effect
 files next to the media (realtime-OSD mode, read-only media dirs).
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -28,6 +30,10 @@ import sys
 import tempfile
 import time
 import wave
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 MODEL_NAME = "parakeet-tdt-0.6b-v2"
 MODEL_DIR = os.path.expanduser(

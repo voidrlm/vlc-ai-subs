@@ -20,7 +20,10 @@ _ENGINES = {
 }
 
 
-def resolve_backend() -> "TranscriptionBackend":
+from backends.base import TranscriptionBackend
+
+
+def resolve_backend() -> TranscriptionBackend:
     """Return the WhisperX backend (default), or the parakeet opt-in."""
     forced = os.environ.get("VSCL_AISUBS_BACKEND", "").strip().lower()
 

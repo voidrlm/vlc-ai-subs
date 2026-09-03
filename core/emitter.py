@@ -6,7 +6,6 @@ the definitive stream. This module keeps zero global state.
 """
 
 import json
-import sys
 from typing import Optional, TextIO
 
 
