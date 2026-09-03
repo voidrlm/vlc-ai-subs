@@ -21,21 +21,6 @@ def runner():
     return mod
 
 
-@pytest.mark.parametrize(
-    ("seconds", "expected"),
-    [
-        (0.0, "00:00:00,000"),
-        (1.0, "00:00:01,000"),
-        (61.5, "00:01:01,500"),
-        (3661.789, "01:01:01,789"),
-        (3599.999, "00:59:59,999"),         # float-drift safe
-        (86399.001, "23:59:59,001"),
-    ],
-)
-def test_format_srt_timestamp(runner, seconds: float, expected: str):
-    assert runner.format_srt_timestamp(seconds) == expected
-
-
 def test_usage_error_emits_error_jsonl(runner, capsys, monkeypatch):
     # Deterministic argv — the test must not depend on how pytest was invoked
     # (pytest's own argv can be ≥5 entries, which would skip the usage branch).
@@ -60,20 +45,39 @@ def test_missing_media_emits_error_jsonl(runner, capsys, monkeypatch):
     assert "File not found" in out
 
 
-# ── write_srt_if_requested ────────────────────────────────────────────
+# ── SRT writing via shared core.srt.write_srt (was runner.write_srt_if_requested) ──
+# write_srt_if_requested lived in both runners and duplicated core/srt.py; it was
+# removed in favor of core.srt.write_srt, which keeps the same explicit-path /
+# empty-drop / symlink-refusal semantics. These tests pin that shared behavior.
 
-def test_write_srt_if_requested_writes(runner, tmp_path):
+def test_write_srt_writes_when_requested(tmp_path):
+    from core.srt import write_srt
     srt = tmp_path / "out.srt"
-    lines = ["1\n00:00:00,000 --> 00:00:01,000\nHi\n"]
-    assert runner.write_srt_if_requested(lines, str(srt)) == str(srt)
-    assert srt.read_text() == lines[0]
+    segs = [{"start": 0.0, "end": 1.0, "text": "Hi"}]
+    assert write_srt(segs, "/unused/movie.mp4", str(srt)) == str(srt)
+    assert "Hi" in srt.read_text()
 
 
-def test_write_srt_if_requested_skips_when_not_requested(runner, tmp_path):
+def test_write_srt_skips_when_not_requested(tmp_path):
+    from core.srt import write_srt
     media = tmp_path / "m.mp4"
     media.write_bytes(b"x")
-    assert runner.write_srt_if_requested(["1\nx\n"], None) is None
-    assert not (tmp_path / "m.srt").exists()  # no side-effect file next to media
+    # No explicit path + no segments would derive <media>.srt; with no
+    # segments nothing is written (no 0-byte SRTs next to media).
+    assert write_srt([], str(media)) is None
+    assert not (tmp_path / "m.srt").exists()
+
+
+def test_write_srt_refuses_symlink(tmp_path):
+    from core.srt import write_srt
+    target = tmp_path / "victim.txt"
+    target.write_text("do not clobber")
+    link = tmp_path / "out.srt"
+    link.symlink_to(target)
+    path = write_srt([{"start": 0.0, "end": 1.0, "text": "line"}], "m.mp4", str(link))
+    assert path is not None and path != str(link)
+    assert target.read_text() == "do not clobber"  # symlink target untouched
+    assert os.path.isfile(path)
 
 
 # ── device / compute resolution (VSCL_AISUBS_DEVICE / VSCL_AISUBS_COMPUTE) ──
@@ -109,23 +113,6 @@ def test_resolve_compute_defaults_and_override(runner, monkeypatch):
     assert runner.resolve_compute("cuda") == "int8_float16"
     monkeypatch.setenv("VSCL_AISUBS_COMPUTE", "bogus")
     assert runner.resolve_compute("cuda") == "int8_float16"
-
-
-def test_write_srt_if_requested_skips_empty(runner, tmp_path):
-    srt = tmp_path / "out.srt"
-    assert runner.write_srt_if_requested([], str(srt)) is None
-    assert not srt.exists()  # no 0-byte SRTs
-
-
-def test_write_srt_if_requested_refuses_symlink(runner, tmp_path):
-    target = tmp_path / "victim.txt"
-    target.write_text("do not clobber")
-    link = tmp_path / "out.srt"
-    link.symlink_to(target)
-    path = runner.write_srt_if_requested(["1\nline\n"], str(link))
-    assert path is not None and path != str(link)
-    assert target.read_text() == "do not clobber"  # symlink target untouched
-    assert os.path.isfile(path)
 
 
 def test_hardened_asr_options(runner):

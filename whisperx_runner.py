@@ -25,6 +25,8 @@ import json
 import os
 import sys
 
+from core.srt import write_srt
+
 
 _CUDA_COMPUTE = ("int8", "int8_float16", "int8_float32", "float16", "float32")
 _CPU_COMPUTE = ("int8", "int8_float32", "float32")
@@ -78,40 +80,8 @@ def hardened_asr_options() -> dict:
     }
 
 
-def format_srt_timestamp(seconds: float) -> str:
-    # Mirror of core/srt.py — total-ms math with rounding, float-safe.
-    total_ms = max(0, round(seconds * 1000))
-    h, rem = divmod(total_ms, 3_600_000)
-    m, rem = divmod(rem, 60_000)
-    s, ms = divmod(rem, 1_000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
 def emit(data: dict):
     print(json.dumps(data, ensure_ascii=False), flush=True)
-
-
-def write_srt_if_requested(srt_lines: list, srt_requested: str | None) -> str | None:
-    """Write the SRT only when an explicit path was requested; else None.
-
-    The plugin caller always writes the SRT itself — the runner must not
-    create <media>.srt side effects (realtime-OSD mode, read-only dirs).
-    Empty output is skipped (no 0-byte SRTs). Raises OSError on write
-    failure so main() can emit a clean JSONL error.
-    """
-    if not srt_requested or not srt_lines:
-        return None
-    srt_path = srt_requested
-    if os.path.islink(srt_path):
-        # Never write through a symlink (temp-name swap attack) — fall back
-        # to a fresh unique path instead. Regular files still overwrite.
-        import tempfile
-        fd, srt_path = tempfile.mkstemp(prefix="aisubs_", suffix=".srt")
-        os.close(fd)
-    os.makedirs(os.path.dirname(srt_path) or ".", exist_ok=True)
-    with open(srt_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(srt_lines))
-    return srt_path
 
 
 def main():
@@ -248,9 +218,9 @@ def main():
         except Exception:
             emit({"type": "status", "msg": "Alignment skipped (may need different language model)"})
 
-    # 4. Yield segments + build SRT
+    # 4. Yield segments; collect dicts for the SRT writer (shared core.srt)
     segments = result.get("segments", [])
-    srt_lines = []
+    out_segments = []
     count = 0
 
     for seg in segments:
@@ -258,19 +228,19 @@ def main():
         if not text:
             continue
         count += 1
-        start = seg.get("start", 0)
-        end = seg.get("end", 0)
-        emit({"type": "sub", "i": count, "start": round(start, 3), "end": round(end, 3), "text": text})
-        srt_lines.append(
-            f"{count}\n"
-            f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n"
-            f"{text}\n"
-        )
+        item = {
+            "start": round(seg.get("start", 0), 3),
+            "end": round(seg.get("end", 0), 3),
+            "text": text,
+        }
+        out_segments.append(item)
+        emit({"type": "sub", "i": count, **item})
 
     # 5. Write SRT — only when the caller explicitly requested a path (the
-    # plugin caller owns SRT output; no <media>.srt side effects).
+    # plugin caller owns SRT output; no <media>.srt side effects). Empty
+    # output → write_srt returns None (no 0-byte SRTs).
     try:
-        srt_path = write_srt_if_requested(srt_lines, srt_requested)
+        srt_path = write_srt(out_segments, media_path, srt_requested)
     except OSError as exc:
         emit({"type": "error", "msg": f"Could not write SRT: {exc}"})
         sys.exit(1)

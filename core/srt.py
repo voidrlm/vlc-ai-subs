@@ -34,21 +34,29 @@ def segments_to_srt(segments: Iterable[dict]) -> str:
     return "\n".join(blocks)
 
 
-def write_srt(segments: list[dict], media_path: str, srt_path: str | None = None) -> str:
-    """Write SRT to disk and return the path used.
+def write_srt(
+    segments: list[dict],
+    media_path: str,
+    srt_path: str | None = None,
+) -> str | None:
+    """Write SRT to disk and return the path used, or None if nothing written.
 
     If *srt_path* is given it is used exactly; otherwise it is derived from
     the media filename (``<media>.srt``). Parent directories are created as
     needed when an explicit path is provided.
-    """
-    if srt_path:
-        actual = srt_path
-        os.makedirs(os.path.dirname(actual) or ".", exist_ok=True)
-    else:
-        base, _ = os.path.splitext(media_path)
-        actual = base + ".srt"
 
+    Empty output is skipped (no 0-byte SRTs). An explicit path that is a
+    symlink is never written through (temp-name swap attack) — a fresh
+    unique path is used instead; regular files still overwrite.
+    """
+    if not segments:
+        return None
+    actual = srt_path or (os.path.splitext(media_path)[0] + ".srt")
+    if srt_path and os.path.islink(srt_path):
+        import tempfile
+        fd, actual = tempfile.mkstemp(prefix="aisubs_", suffix=".srt")
+        os.close(fd)
+    os.makedirs(os.path.dirname(actual) or ".", exist_ok=True)
     with open(actual, "w", encoding="utf-8") as f:
         f.write(segments_to_srt(segments))
-
     return actual

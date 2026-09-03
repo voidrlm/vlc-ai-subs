@@ -24,20 +24,6 @@ def runner():
     return mod
 
 
-@pytest.mark.parametrize(
-    ("seconds", "expected"),
-    [
-        (0.0, "00:00:00,000"),
-        (1.9999, "00:00:02,000"),      # rounds to nearest ms
-        (61.5, "00:01:01,500"),
-        (3661.789, "01:01:01,789"),
-        (3599.999, "00:59:59,999"),    # float-drift safe
-    ],
-)
-def test_format_srt_timestamp(runner, seconds: float, expected: str):
-    assert runner.format_srt_timestamp(seconds) == expected
-
-
 def test_tokens_to_words(runner):
     """BPE tokens with per-token timestamps merge into real words."""
     tokens = [" Well", ",", " I", " don", "'", "t", " w", "ish", " to", " go", "."]
@@ -115,39 +101,6 @@ def test_missing_model_emits_install_hint(runner, capsys, monkeypatch, tmp_path)
         runner.main()
     assert exc.value.code == 1
     assert "install-parakeet-model.sh" in capsys.readouterr().out
-
-
-# ── write_srt_if_requested ────────────────────────────────────────────
-
-def test_write_srt_if_requested_writes(runner, tmp_path):
-    srt = tmp_path / "out.srt"
-    lines = ["1\n00:00:00,400 --> 00:00:03,520\nHi\n"]
-    assert runner.write_srt_if_requested(lines, str(srt)) == str(srt)
-    assert srt.read_text() == lines[0]
-
-
-def test_write_srt_if_requested_skips_when_not_requested(runner, tmp_path):
-    media = tmp_path / "m.mp4"
-    media.write_bytes(b"x")
-    assert runner.write_srt_if_requested(["1\nx\n"], None) is None
-    assert not (tmp_path / "m.srt").exists()  # no side-effect file next to media
-
-
-def test_write_srt_if_requested_skips_empty(runner, tmp_path):
-    srt = tmp_path / "out.srt"
-    assert runner.write_srt_if_requested([], str(srt)) is None
-    assert not srt.exists()  # no 0-byte SRTs
-
-
-def test_write_srt_if_requested_refuses_symlink(runner, tmp_path):
-    target = tmp_path / "victim.txt"
-    target.write_text("do not clobber")
-    link = tmp_path / "out.srt"
-    link.symlink_to(target)
-    path = runner.write_srt_if_requested(["1\nline\n"], str(link))
-    assert path is not None and path != str(link)
-    assert target.read_text() == "do not clobber"  # symlink target untouched
-    assert os.path.isfile(path)
 
 
 # ── long-media chunking ───────────────────────────────────────────────
