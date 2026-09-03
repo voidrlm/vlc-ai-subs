@@ -226,12 +226,14 @@ local function shq(s)
 end
 
 function get_media_duration()
-    -- Try VLC player first (currently playing media)
+    -- Try VLC player first (currently playing media).
+    -- item:duration() already returns SECONDS (VLC 3.x + 4.x Lua README) —
+    -- no /1000 here, or the ETA/progress estimate would be 1000x too fast.
     local item = get_input_item()
     if item then
-        local dur = item:duration()  -- returns milliseconds, or -1
+        local dur = item:duration()
         if dur and dur > 0 then
-            return dur / 1000  -- convert to seconds
+            return dur
         end
     end
     return 0
