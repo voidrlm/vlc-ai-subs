@@ -10,17 +10,18 @@ Two modes:
 Requires: Python 3.12 + WhisperX (word-level aligned subtitles)
 Install:  Run setup.sh (Linux/macOS) or setup.bat (Windows).
 
-https://github.com/voidrlm/vlc-ai-subs
+https://github.com/chethan62/vlc-ai-subs
 ]]
 
 function descriptor()
     return {
         title = "AI Subs Generator",
         version = "3.4",
-        author = "voidrlm",
-        url = "https://github.com/voidrlm/vlc-ai-subs",
-        shortdesc = "AI subtitle generator (Whisper)",
-        description = "Generate subtitles using Whisper AI. "
+        author = "chethan62",
+        url = "https://github.com/chethan62/vlc-ai-subs",
+        shortdesc = "AI subtitle generator (WhisperX/Parakeet)",
+        description = "Generate subtitles using local AI. "
+            .. "WhisperX (multilingual) or Parakeet (English, fastest). "
             .. "Real-time OSD or generate-and-load SRT. "
             .. "Compatible with VLC 3.x and 4.x.",
         capabilities = {"menu"},
