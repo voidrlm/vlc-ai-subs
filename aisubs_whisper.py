@@ -1,194 +1,247 @@
 #!/usr/bin/env python3
 """
-vlc-ai-subs — Whisper transcription backend.
+vlc-ai-subs — Whisper transcription backend for VLC.
 
-Transcribes audio from a media file using faster-whisper (or openai-whisper
-as fallback) and streams results as JSON lines to stdout. Also writes a
-standard SRT subtitle file next to the source media.
+Architecture
+────────────
+  aisubs_whisper.py        CLI entry-point (you are here)
+  core/
+    emitter.py             JSONL output + file mirror for Lua polling
+    srt.py                 SRT timestamp formatting and file writing
+  backends/
+    base.py                Abstract TranscriptionBackend
+    whisperx_backend.py    WhisperX (word-aligned, Python 3.12 subprocess) — default
+    parakeet.py            Parakeet TDT via sherpa-onnx (English, CPU, ~10x faster)
 
-Usage:
-    python3 aisubs_whisper.py <media_path> <model> <language> <task>
+Usage
+─────
+  python3 aisubs_whisper.py <media> <model> <language> <task> [out_file] [srt_path]
 
-Arguments:
-    media_path  Path to the video/audio file
-    model       Whisper model size: tiny, base, small, medium, large
-    language    Language code (e.g. en, es, hi) or "auto" for detection
-    task        "transcribe" or "translate" (translate outputs English)
-
-Output (stdout):
-    One JSON object per line:
-      {"type": "status", "msg": "..."}           — progress updates
-      {"type": "sub", "i": N, "start": S, "end": E, "text": "..."}  — subtitle
-      {"type": "done", "segments": N, "srt_path": "..."}            — finished
-      {"type": "error", "msg": "..."}            — fatal error
+Output (stdout) — one JSON object per line
+  {"type": "status", "msg": "..."}
+  {"type": "sub", "i": N, "start": S, "end": E, "text": "..."}
+  {"type": "done", "segments": N, "srt_path": "..."}
+  {"type": "error", "msg": "..."}
 """
 
-import sys
 import os
-import json
+import sys
+import time
+import traceback
+
+from core.emitter import Emitter
+from core.srt import write_srt
+from core.blocklist import filter_segments
+from backends import resolve_backend
+
+# ── Debug logging ────────────────────────────────────────────────────
+# Enable with a trailing `--debug` CLI arg or VSCL_AISUBS_DEBUG=1.
+# Debug lines go to stderr AND /tmp/aisubs_debug.log (VLC itself shows
+# stderr in its logs; the file survives terminal restarts).
+
+DEBUG_FILE = "/tmp/aisubs_debug.log"
 
 
-def format_srt_timestamp(seconds: float) -> str:
-    """Convert seconds to SRT timestamp (HH:MM:SS,mmm)."""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+def _debug_enabled() -> bool:
+    return os.environ.get("VSCL_AISUBS_DEBUG") == "1" or "--debug" in sys.argv
 
 
-_out_file = None  # optional output file set in main()
-
-def emit(data: dict) -> None:
-    """Write a JSON line to stdout and to the output file if set."""
-    line = json.dumps(data, ensure_ascii=False)
-    print(line, flush=True)
-    if _out_file:
-        try:
-            _out_file.write(line + "\n")
-            _out_file.flush()
-        except Exception:
-            pass
+def _log_debug(msg: str) -> None:
+    line = f"[debug {time.strftime('%H:%M:%S')}] {msg}"
+    sys.stderr.write(line + "\n")
+    try:
+        with open(DEBUG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
-def transcribe_faster_whisper(media_path, model_name, lang, task):
-    """Transcribe using faster-whisper (CTranslate2 backend)."""
-    from faster_whisper import WhisperModel
+# ── Hardware-aware model recommendation ──────────────────────────────────
 
-    emit({"type": "status", "msg": f"Loading {model_name} model..."})
-    model = WhisperModel(model_name, device="cpu", compute_type="float32")
-
-    emit({"type": "status", "msg": "Transcribing..."})
-    segments_gen, _info = model.transcribe(
-        media_path,
-        language=lang,
-        task=task,
-        beam_size=1,
-        vad_filter=True,
-        vad_parameters={
-            "threshold": 0.05,
-            "min_silence_duration_ms": 200,
-            "speech_pad_ms": 600,
-            "min_speech_duration_ms": 50,
-        },
-    )
-
-    for seg in segments_gen:
-        text = seg.text.strip()
-        if text:
-            yield {"start": seg.start, "end": seg.end, "text": text}
+def _detect_vram_mb() -> int:
+    """Return GPU VRAM in MiB via nvidia-smi, or 0 if detection fails."""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader"],
+            text=True, timeout=5,
+        )
+        return int(out.strip().split()[0])
+    except Exception:
+        return 0
 
 
-def transcribe_openai_whisper(media_path, model_name, lang, task):
-    """Transcribe using openai-whisper (fallback)."""
-    import whisper
+def _detect_ram_gb() -> int:
+    """Return system RAM in GiB from /proc/meminfo."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    return kb // (1024 * 1024)  # KB → GiB
+    except Exception:
+        pass
+    return 4  # conservative default
 
-    emit({"type": "status", "msg": f"Loading {model_name} model..."})
-    model = whisper.load_model(model_name)
 
-    emit({"type": "status", "msg": "Transcribing (batch mode)..."})
-    options = {"task": task}
-    if lang:
-        options["language"] = lang
-    result = model.transcribe(media_path, **options)
+def _recommend_model(backend_name: str = "whisperx") -> str:
+    """Pick the model based on GPU VRAM (system RAM on CPU).
 
-    for seg in result["segments"]:
-        text = seg["text"].strip()
-        if text:
-            yield {"start": seg["start"], "end": seg["end"], "text": text}
+    WhisperX transcribes via faster-whisper (CTranslate2, int8_float16 on
+    CUDA) — roughly 2× the VRAM footprint of GGML models. When a GPU is
+    detected, only VRAM tiering applies (never fall through to RAM sizing,
+    which could over-recommend for a small GPU).
 
+    Research (2026-08): large-v3-turbo (809M) is WhisperX's accuracy/speed
+    sweet spot — near-large WER at ~4× the speed, ~1.5-1.8GB VRAM int8.
+    """
+    vram_mb = _detect_vram_mb()
+    if vram_mb > 0:
+        if vram_mb >= 8000:   return "large"
+        elif vram_mb >= 4000: return "large-v3-turbo"
+        elif vram_mb >= 2000: return "small"
+        return "base"
+
+    # No usable GPU — CPU path, bound by system RAM
+    ram_gb = _detect_ram_gb()
+    if ram_gb >= 8:   return "medium"
+    elif ram_gb >= 4: return "small"
+    return "base"
+
+
+# ── CLI entry-point ──────────────────────────────────────────────────────
 
 def main():
-    global _out_file
+    _t0 = time.time()
+    # --debug may appear anywhere; capture BEFORE stripping, then remove it
+    # so positional parsing is unaffected.
+    debug = _debug_enabled()
+    if "--debug" in sys.argv:
+        sys.argv.remove("--debug")
+    if debug:
+        # Propagate to the WhisperX subprocess (backend dumps runner output)
+        os.environ["VSCL_AISUBS_DEBUG"] = "1"
 
     if len(sys.argv) < 5:
-        emit({"type": "error", "msg": "Usage: aisubs_whisper.py <media> <model> <lang> <task> [out_file]"})
+        sys.stderr.write(
+            "Usage: aisubs_whisper.py <media> <model> <lang> <task> [out_file] [srt_path]\n"
+        )
         sys.exit(1)
 
     media_path = sys.argv[1]
     model_name = sys.argv[2]
     language = sys.argv[3] if sys.argv[3] != "auto" else None
     task = sys.argv[4]
+    mirror_file = sys.argv[5] if len(sys.argv) > 5 else None
+    srt_requested = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6].strip() else None
 
-    # Optional output file — Lua passes this so output is captured without shell redirection
-    if len(sys.argv) > 5:
-        try:
-            _out_file = open(sys.argv[5], "w", encoding="utf-8", buffering=1)
-        except Exception as e:
-            pass  # if we can't open it, stdout-only mode
+    if debug:
+        _log_debug(f"args: media={media_path!r} model={model_name!r} lang={language!r} task={task!r}")
+
+    emitter = Emitter(mirror_file)
 
     if not os.path.isfile(media_path):
-        emit({"type": "error", "msg": f"File not found: {media_path}"})
+        emitter.emit({"type": "error", "msg": f"File not found: {media_path}"})
+        emitter.close()
         sys.exit(1)
 
-    # Detect backend
-    backend = None
     try:
-        import faster_whisper  # noqa: F401
-        backend = "faster-whisper"
-    except ImportError:
-        pass
+        backend = resolve_backend()
+    except RuntimeError as exc:
+        emitter.emit({"type": "error", "msg": str(exc)})
+        emitter.close()
+        sys.exit(1)
+    if debug:
+        _log_debug(f"backend resolved: {backend.name()} ({time.time() - _t0:.1f}s)")
 
-    if not backend:
-        try:
-            import whisper  # noqa: F401
-            backend = "openai-whisper"
-        except ImportError:
-            emit({"type": "error", "msg": "No Whisper backend found. Run: pip install faster-whisper"})
-            sys.exit(1)
+    # Resolve "recommended" → best model for this backend + hardware
+    if model_name == "recommended":
+        model_name = _recommend_model(backend.name())
+        if debug:
+            _log_debug(
+                f"recommended -> {model_name} (VRAM {_detect_vram_mb()} MiB, RAM {_detect_ram_gb()} GiB)"
+            )
 
-    # Choose transcription function
-    if backend == "faster-whisper":
-        segments_iter = transcribe_faster_whisper(media_path, model_name, language, task)
-    else:
-        segments_iter = transcribe_openai_whisper(media_path, model_name, language, task)
+    emitter.emit({
+        "type": "status",
+        "msg": f"Backend: {backend.name()} — {model_name} ({language or 'auto'}, {task})",
+    })
 
-    # Stream segments and build SRT
-    srt_lines = []
-    count = 0
-
+    # Transcribe
+    emitter.emit({"type": "status", "msg": "Transcribing..."})
+    segments = []
+    _t1 = time.time()
     try:
-        for seg in segments_iter:
-            count += 1
-            emit({
-                "type": "sub",
-                "i": count,
+        for seg in backend.transcribe(media_path, model_name, language, task):
+            segment = {
                 "start": round(seg["start"], 3),
                 "end": round(seg["end"], 3),
                 "text": seg["text"],
+            }
+            segments.append(segment)
+            emitter.emit({
+                "type": "sub",
+                "i": len(segments),
+                **segment,
             })
-            srt_lines.append(
-                f"{count}\n"
-                f"{format_srt_timestamp(seg['start'])} --> {format_srt_timestamp(seg['end'])}\n"
-                f"{seg['text']}\n"
-            )
-    except Exception as e:
-        import traceback
-        emit({"type": "error", "msg": f"Transcription failed: {e}\n{traceback.format_exc()}"})
+    except Exception as exc:
+        emitter.emit({
+            "type": "error",
+            "msg": f"Transcription failed: {exc}\n{traceback.format_exc()}",
+        })
+        emitter.close()
         sys.exit(1)
+    if debug:
+        _log_debug(f"transcription done: {len(segments)} segments in {time.time() - _t1:.1f}s")
 
-    # Write SRT file next to the media
-    base, _ = os.path.splitext(media_path)
-    srt_path = base + ".srt"
+    # Write SRT (skip if no segments — avoids empty .srt files)
+    # Drop known hallucination segments (research §2.2) before writing.
+    raw_empty = not segments
+    segments = filter_segments(segments)
+    if not segments:
+        msg = ("No speech detected — skipping SRT." if raw_empty
+               else "All segments filtered by the hallucination blocklist — skipping SRT.")
+        emitter.emit({"type": "status", "msg": msg})
+        emitter.emit({"type": "done", "segments": 0, "srt_path": None})
+        emitter.close()
+        sys.exit(0)
+
     try:
-        with open(srt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(srt_lines))
-    except Exception as e:
-        emit({"type": "error", "msg": f"Could not write SRT: {e}"})
-        sys.exit(1)
+        srt_path = write_srt(segments, media_path, srt_requested)
+    except OSError as exc:
+        # Media dir may be read-only (mounted disc, network share) — fall
+        # back to a writable temp path instead of aborting after a
+        # successful run; the status line tells the user where it went.
+        import tempfile
+        fallback = os.path.join(
+            tempfile.gettempdir(), f"aisubs_{int(time.time())}_{os.getpid()}.srt"
+        )
+        try:
+            srt_path = write_srt(segments, media_path, fallback)
+        except OSError as exc2:
+            emitter.emit({"type": "error", "msg": f"Could not write SRT: {exc2}"})
+            emitter.close()
+            sys.exit(1)
+        emitter.emit({
+            "type": "status",
+            "msg": f"Could not write SRT next to media ({exc}); wrote {srt_path} instead.",
+        })
 
-    emit({"type": "done", "segments": count, "srt_path": srt_path})
-
-    if _out_file:
-        _out_file.close()
+    emitter.emit({"type": "done", "segments": len(segments), "srt_path": srt_path})
+    if debug:
+        _log_debug(f"done: {len(segments)} segments -> {srt_path} (total {time.time() - _t0:.1f}s)")
+    emitter.close()
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
-        import traceback
-        emit({"type": "error", "msg": str(e) + "\n" + traceback.format_exc()})
-        if _out_file:
-            _out_file.close()
+    except Exception as exc:
+        try:
+            print(
+                '{"type": "error", "msg": "%s"}' % str(exc).replace('"', '\\"'),
+                flush=True,
+            )
+        except OSError:
+            pass
         sys.exit(1)

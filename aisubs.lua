@@ -7,47 +7,66 @@ Two modes:
   1. Real-time OSD  — transcribes then shows subtitles via OSD
   2. Generate & Load — full SRT is created then loaded synced to playback
 
-Requires: Python 3 + faster-whisper (or openai-whisper)
+Requires: Python 3.12 + WhisperX (word-level aligned subtitles)
 Install:  Run setup.sh (Linux/macOS) or setup.bat (Windows).
 
-https://github.com/voidrlm/vlc-ai-subs
+https://github.com/chethan62/vlc-ai-subs
 ]]
 
 function descriptor()
     return {
         title = "AI Subs Generator",
-        version = "3.2",
-        author = "voidrlm",
-        url = "https://github.com/voidrlm/vlc-ai-subs",
-        shortdesc = "AI subtitle generator (Whisper)",
-        description = "Generate subtitles using Whisper AI. "
+        version = "3.4",
+        author = "chethan62",
+        url = "https://github.com/chethan62/vlc-ai-subs",
+        shortdesc = "AI subtitle generator (WhisperX/Parakeet)",
+        description = "Generate subtitles using local AI. "
+            .. "WhisperX (multilingual) or Parakeet (English, fastest). "
             .. "Real-time OSD or generate-and-load SRT. "
             .. "Compatible with VLC 3.x and 4.x.",
         capabilities = {"menu"},
     }
 end
 
-local dlg          = nil
-local model_dropdown = nil
-local lang_input   = nil
-local task_dropdown = nil
-local mode_dropdown = nil
-local status_label = nil
-local osd_channel  = nil
+local dlg            = nil
+local engine_dropdown = nil
+local model_dropdown  = nil
+local lang_input      = nil
+local task_dropdown   = nil
+local mode_dropdown   = nil
+local status_label    = nil
+local progress_bar    = nil
+local debug_label     = nil
+local osd_channel     = nil
 
 -- Polling state (set by start_generation, used by poll_progress)
-local _poll_tmp   = nil
-local _poll_mode  = nil
-local _poll_model = nil
-local _poll_tmr   = nil
-local _poll_secs  = 0
-local POLL_US     = 3000000  -- poll every 3 seconds
+local _poll_tmp      = nil
+local _poll_mode     = nil
+local _poll_model    = nil
+local _poll_engine   = nil
+local _poll_tmr      = nil
+local _poll_secs     = 0
+local _poll_duration = 0
+local _poll_est_total = 30
+local POLL_US     = 1000000  -- poll every 1 second (was 3s)
+
+-- Seed the temp-name RNG once at load — predictable /tmp names are a
+-- symlink-attack vector (see get_temp_file).
+-- Guarded: VLC's extension *scan* runs scripts in a bare lua state with no
+-- standard libs (math is nil) — an unguarded call here aborts registration.
+-- At runtime GetLuaState() opens all libs, so the seed then actually runs.
+if math then
+    math.randomseed(os.time() * 1000 + (os.clock() * 1000) % 1000)
+end
 
 ----------------------------------------------------------------
 -- Lifecycle
 ----------------------------------------------------------------
 
-function activate()   create_dialog() end
+function activate()
+    vlc.msg.info("[AI Subs] activate() called")
+    create_dialog()
+end
 function deactivate() if dlg then dlg:delete(); dlg = nil end end
 function close()      deactivate() end
 
@@ -59,32 +78,45 @@ function trigger_menu(id) if id == 1 then create_dialog() end end
 ----------------------------------------------------------------
 
 function create_dialog()
+    vlc.msg.info("[AI Subs] create_dialog()")
+    -- OSD fallback: always visible even if dialog fails on Wayland
+    vlc.osd.message("AI Subs Generator ready — check View menu", 3)
+
     if dlg then dlg:delete() end
     dlg = vlc.dialog("AI Subs Generator")
 
-    dlg:add_label("Mode:", 1, 1, 1, 1)
-    mode_dropdown = dlg:add_dropdown(2, 1, 2, 1)
-    mode_dropdown:add_value("Real-time OSD", 1)
-    mode_dropdown:add_value("Generate & Load SRT", 2)
+    dlg:add_label("Engine:", 1, 1, 1, 1)
+    engine_dropdown = dlg:add_dropdown(2, 1, 2, 1)
+    engine_dropdown:add_value("WhisperX (multilingual, aligned)", 0)
+    engine_dropdown:add_value("Parakeet (English, fastest)", 1)
 
     dlg:add_label("Model:", 1, 2, 1, 1)
     model_dropdown = dlg:add_dropdown(2, 2, 2, 1)
+    model_dropdown:add_value("Recommended (auto)", 0)
     model_dropdown:add_value("tiny (fastest)", 1)
     model_dropdown:add_value("base (balanced)", 2)
     model_dropdown:add_value("small (accurate)", 3)
     model_dropdown:add_value("medium (very accurate)", 4)
     model_dropdown:add_value("large (best quality)", 5)
+    model_dropdown:add_value("large-v3-turbo (fast + accurate)", 6)
 
     dlg:add_label("Language:", 1, 3, 1, 1)
     lang_input = dlg:add_text_input("auto", 2, 3, 2, 1)
 
     dlg:add_label("Task:", 1, 4, 1, 1)
     task_dropdown = dlg:add_dropdown(2, 4, 2, 1)
-    task_dropdown:add_value("Transcribe (same language)", 1)
-    task_dropdown:add_value("Translate to English", 2)
+    task_dropdown:add_value("Translate to English", 1)
+    task_dropdown:add_value("Transcribe (same language)", 2)
 
-    dlg:add_button("Generate", start_generation, 1, 5, 3, 1)
-    status_label = dlg:add_label("Ready. Play a media file and click Generate.", 1, 6, 3, 1)
+    dlg:add_label("Mode:", 1, 5, 1, 1)
+    mode_dropdown = dlg:add_dropdown(2, 5, 2, 1)
+    mode_dropdown:add_value("Real-time OSD", 1)
+    mode_dropdown:add_value("Generate & Load SRT", 2)
+
+    dlg:add_button("Generate", start_generation, 1, 6, 3, 1)
+    status_label = dlg:add_label("Ready. Play a media file and click Generate.", 1, 7, 3, 1)
+    progress_bar = dlg:add_progress_bar(0, 1, 8, 3, 1)
+    debug_label  = dlg:add_label("", 1, 9, 3, 1)
     dlg:show()
 end
 
@@ -93,15 +125,24 @@ end
 ----------------------------------------------------------------
 
 function get_model_name()
-    local models = {"tiny", "base", "small", "medium", "large"}
+    local models = {"recommended", "tiny", "base", "small", "medium", "large", "large-v3-turbo"}
     local id = model_dropdown:get_value()
-    if id and id >= 1 and id <= 5 then return models[id] end
-    return "base"
+    if id and id >= 0 and id <= 6 then return models[id + 1] end
+    return "recommended"
 end
 
 function get_task()
-    if task_dropdown:get_value() == 2 then return "translate" end
-    return "transcribe"
+    if task_dropdown:get_value() == 2 then return "transcribe" end
+    return "translate"
+end
+
+function get_engine()
+    -- WhisperX default (multilingual); Parakeet opt-in for English speed.
+    -- Maps to VSCL_AISUBS_BACKEND for the Python side.
+    local engines = {"whisperx", "parakeet"}
+    local id = engine_dropdown:get_value()
+    if id and id >= 0 and id <= 1 then return engines[id + 1] end
+    return "whisperx"
 end
 
 function get_mode()
@@ -166,14 +207,37 @@ function get_home()
 end
 
 function get_temp_file()
-    local tmp
+    -- Random component: /tmp/aisubs_<time>_<rand>.txt — a predictable name
+    -- lets a local attacker pre-plant a symlink that our open() would follow.
+    local unique = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
     if is_windows() then
-        tmp = os.getenv("TEMP") or os.getenv("TMP") or (get_home() .. "\\AppData\\Local\\Temp")
-        return tmp .. "\\aisubs_" .. os.time() .. ".txt"
+        local tmp = os.getenv("TEMP") or os.getenv("TMP") or (get_home() .. "\\AppData\\Local\\Temp")
+        return tmp .. "\\aisubs_" .. unique .. ".txt"
     else
-        tmp = os.getenv("TMPDIR") or "/tmp"
-        return tmp .. "/aisubs_" .. os.time() .. ".txt"
+        local tmp = os.getenv("TMPDIR") or "/tmp"
+        return tmp .. "/aisubs_" .. unique .. ".txt"
     end
+end
+
+-- POSIX sh single-quote escaping. Every interpolated value lands inside a
+-- shell command (os.execute → /bin/sh -c); double quotes alone are NOT
+-- sufficient — $(...) and backticks execute even inside them.
+local function shq(s)
+    return "'" .. string.gsub(s or "", "'", "'\\''") .. "'"
+end
+
+function get_media_duration()
+    -- Try VLC player first (currently playing media).
+    -- item:duration() already returns SECONDS (VLC 3.x + 4.x Lua README) —
+    -- no /1000 here, or the ETA/progress estimate would be 1000x too fast.
+    local item = get_input_item()
+    if item then
+        local dur = item:duration()
+        if dur and dur > 0 then
+            return dur
+        end
+    end
+    return 0
 end
 
 ----------------------------------------------------------------
@@ -281,12 +345,24 @@ function start_generation()
     local python    = find_python(script_dir)
     local model     = get_model_name()
     local language  = lang_input:get_text() or "auto"
+    -- Whitelist language codes: this free-text field lands inside a shell
+    -- command below, so reject anything that is not a lang tag (en, zh-CN…).
+    if language ~= "auto" and not string.match(language, "^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$") then
+        set_status("Error: invalid language code: " .. language)
+        return
+    end
     local task      = get_task()
     local mode      = get_mode()
     local tmp_file  = get_temp_file()
 
-    -- Write sentinel so we can detect if Python started writing
-    local test_f = io.open(tmp_file, "w")
+    -- Write sentinel so we can detect if Python started writing.
+    -- Prefer exclusive create ("wx" fails on a pre-planted symlink instead of
+    -- following it); older Lua builds fall back to "w" — the random temp name
+    -- already blocks the symlink race regardless.
+    local ok, test_f = pcall(io.open, tmp_file, "wx")
+    if not ok or not test_f then
+        test_f = io.open(tmp_file, "w")
+    end
     if not test_f then
         set_status("Error: cannot write to temp dir: " .. tmp_file)
         return
@@ -298,6 +374,17 @@ function start_generation()
     -- Windows: VBScript with bWaitOnReturn=False → wscript exits immediately.
     -- Unix:    trailing & → shell forks Python and exits immediately.
     -- In both cases io.popen returns at once and we poll tmp_file via vlc.timer.
+    local engine = get_engine()
+    -- Parakeet ignores the model dropdown (fixed parakeet-tdt-0.6b-v2);
+    -- show the model that actually runs in the status lines.
+    local shown_model = (engine == "parakeet") and "parakeet-tdt-0.6b-v2" or model
+    -- Realtime-OSD mode: write the SRT to a writable temp path (never next
+    -- to the media, and immune to read-only media dirs). "Generate & Load"
+    -- passes "" so the caller derives <media>.srt.
+    local srt_arg = ""
+    if mode == "realtime" then
+        srt_arg = string.gsub(tmp_file, "%.txt$", ".srt")
+    end
     local cmd
     if is_windows() then
         local vbs_file = string.gsub(tmp_file, "%.txt$", ".vbs")
@@ -307,36 +394,70 @@ function start_generation()
             return
         end
         -- In VBScript string literals a literal double-quote is written as ""
-        local raw_cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s"',
-            python, script, media_path, model, language, task, tmp_file)
-        local vbs_cmd = raw_cmd:gsub('"', '""')
+        local raw_cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s" "%s" --debug',
+            python, script, media_path, model, language, task, tmp_file, srt_arg)
+        local vbs_cmd = raw_cmd:gsub('"', '""'):gsub("[\r\n]", "")  -- + strip line breaks (VBS line injection)
         vf:write('Set sh = CreateObject("WScript.Shell")\n')
+        if engine ~= "" then
+            -- Windows can't prefix env vars on the command line; set them on
+            -- the child process via WScript.Shell's environment instead.
+            vf:write('sh.Environment("PROCESS")("VSCL_AISUBS_BACKEND") = "' .. engine .. '"\n')
+        end
         vf:write('sh.Run "' .. vbs_cmd .. '", 0, False\n')  -- 0=hidden, False=don't wait
         vf:close()
         cmd = 'wscript.exe /nologo "' .. vbs_file .. '"'
     else
-        cmd = string.format('"%s" -u "%s" "%s" "%s" "%s" "%s" "%s" &',
-            python, script, media_path, model, language, task, tmp_file)
+        local env_prefix = ""
+        if engine ~= "" then
+            env_prefix = "VSCL_AISUBS_BACKEND=" .. engine .. " "
+        end
+        cmd = string.format('%s%s -u %s %s %s %s %s %s %s --debug',
+            env_prefix, shq(python), shq(script), shq(media_path), shq(model),
+            shq(language), shq(task), shq(tmp_file), shq(srt_arg))
     end
 
     vlc.msg.info("[AI Subs] python: " .. python)
     vlc.msg.info("[AI Subs] media:  " .. media_path)
     vlc.msg.info("[AI Subs] tmp:    " .. tmp_file)
 
-    local pipe = io.popen(cmd)
-    if not pipe then
-        set_status("Error: failed to launch Python. Check VLC logs.")
-        return
+    -- Launch via os.execute with & for true non-blocking background.
+    -- io.popen blocks in VLC's Lua sandbox; os.execute returns instantly.
+    if is_windows() then
+        local ok = os.execute(cmd)
+        if ok ~= 0 then
+            set_status("Error: failed to launch Python. Check VLC logs.")
+            return
+        end
+    else
+        os.execute(cmd .. " &")
     end
-    pipe:read("*a")  -- returns immediately (process is backgrounded)
-    pipe:close()
 
-    -- Poll tmp_file every 3 s; VLC's thread stays free the whole time
-    _poll_tmp   = tmp_file
-    _poll_mode  = mode
-    _poll_model = model
-    _poll_secs  = 0
-    set_status("Transcribing with " .. model .. "... please wait")
+    -- Poll tmp_file every second; VLC's thread stays free the whole time
+    _poll_tmp    = tmp_file
+    _poll_mode   = mode
+    _poll_model  = shown_model
+    _poll_engine = (engine == "parakeet") and "Parakeet" or "WhisperX"
+    _poll_secs   = 0
+
+    -- Estimate total time: rough RTF × audio duration (engine-dependent).
+    -- Parakeet ≈ 10× realtime on CPU (0.1); WhisperX ≈ 0.3× GPU / 2× CPU.
+    local duration = get_media_duration()
+    _poll_duration = duration or 0
+    if _poll_duration > 0 then
+        if engine == "parakeet" then
+            _poll_est_total = _poll_duration * 0.1
+        else
+            _poll_est_total = _poll_duration * 0.5
+        end
+    else
+        _poll_est_total = 30  -- unknown, guess 30s
+    end
+
+    set_status("Transcribing with " .. _poll_engine .. " (" .. shown_model .. ")... please wait")
+    progress_bar:set_value(0)
+
+    -- Show debug command so user can run it from terminal if needed
+    debug_label:set_text("Debug: " .. cmd)
     _poll_tmr = vlc.timer(poll_progress)
     _poll_tmr:schedule(POLL_US)
 end
@@ -348,10 +469,17 @@ end
 function poll_progress()
     _poll_secs = _poll_secs + (POLL_US / 1000000)
 
+    -- Update progress bar based on elapsed vs estimated
+    if _poll_est_total > 0 then
+        local pct = math.min(95, (_poll_secs / _poll_est_total) * 100)
+        progress_bar:set_value(pct)
+    end
+
     local f = io.open(_poll_tmp, "r")
     if not f then
         -- Temp file gone — shouldn't happen; keep waiting
-        set_status(string.format("Transcribing with %s... %ds", _poll_model, _poll_secs))
+        local eta = math.max(0, _poll_est_total - _poll_secs)
+        set_status(string.format("Transcribing with %s (%s)... %ds  ETA ~%ds", _poll_engine, _poll_model, _poll_secs, eta))
         _poll_tmr:schedule(POLL_US)
         return
     end
@@ -371,9 +499,11 @@ function poll_progress()
     if d and (d.type == "done" or d.type == "error") then
         -- Python finished — process results
         _poll_tmr = nil
+        progress_bar:set_value(100)
         process_results(_poll_tmp, _poll_mode)
     else
-        set_status(string.format("Transcribing with %s... %ds", _poll_model, _poll_secs))
+        local eta = math.max(0, _poll_est_total - _poll_secs)
+        set_status(string.format("Transcribing with %s (%s)... %ds  ETA ~%ds", _poll_engine, _poll_model, _poll_secs, eta))
         _poll_tmr:schedule(POLL_US)
     end
 end
@@ -410,6 +540,8 @@ function process_results(tmp_file, mode)
                     osd_channel = osd_channel or register_osd()
                     show_osd(d.text, dur)
                 end
+            elseif d.type == "status" then
+                set_status(d.msg or "")
             elseif d.type == "done" then
                 srt_path  = d.srt_path
                 seg_count = d.segments or seg_count
@@ -420,7 +552,11 @@ function process_results(tmp_file, mode)
     pcall(function() os.remove(tmp_file) end)
 
     if not srt_path then
-        set_status("Error: transcription failed. Check VLC logs for details.")
+        if seg_count == 0 then
+            set_status("No speech detected — nothing to transcribe.")
+        else
+            set_status("Error: transcription failed. Check VLC logs for details.")
+        end
         return
     end
 
