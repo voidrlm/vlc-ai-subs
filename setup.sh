@@ -177,11 +177,28 @@ else
     fail "Could not find pip in virtual environment"
 fi
 
-# 4. Install faster-whisper
-info "Installing faster-whisper (this may take a few minutes)..."
-"$VENV_PIP" install --quiet --upgrade pip
-"$VENV_PIP" install --quiet faster-whisper
-"$VENV_PYTHON" -c "from faster_whisper import WhisperModel; print('  ✓ faster-whisper installed')"
+# 4. Install WhisperX in its own Python 3.12 venv
+#    (whisperx requires <3.14 — the main venv may be 3.14+)
+info "Installing WhisperX (Python 3.12 venv, this may take a few minutes)..."
+if command -v uv &>/dev/null; then
+    if [ ! -d "$SCRIPT_DIR/venv-whisperx" ]; then
+        uv venv --python 3.12 "$SCRIPT_DIR/venv-whisperx"
+        uv pip install --python "$SCRIPT_DIR/venv-whisperx/bin/python" whisperx
+    fi
+elif command -v python3.12 &>/dev/null; then
+    if [ ! -d "$SCRIPT_DIR/venv-whisperx" ]; then
+        python3.12 -m venv "$SCRIPT_DIR/venv-whisperx"
+        "$SCRIPT_DIR/venv-whisperx/bin/pip" install --quiet --upgrade pip
+        "$SCRIPT_DIR/venv-whisperx/bin/pip" install --quiet whisperx
+    fi
+else
+    warn "Need uv or python3.12 to install WhisperX (it requires Python <3.14)."
+    warn "Install uv:  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    fail "WhisperX not installed — re-run after installing uv."
+fi
+ok "WhisperX installed"
+info "Verifying WhisperX..."
+"$SCRIPT_DIR/venv-whisperx/bin/python" -c "import whisperx; print('  ✓ whisperx ready')"
 
 # 5. Install VLC extension
 install_vlc_extension

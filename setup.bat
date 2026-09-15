@@ -54,13 +54,29 @@ if not exist "%VENV_DIR%\Scripts\pip.exe" (
     echo   Virtual environment already exists.
 )
 
-REM 3. Install faster-whisper
-echo   Installing faster-whisper (this may take a few minutes)...
-"%VENV_DIR%\Scripts\pip.exe" install --quiet --upgrade pip
-"%VENV_DIR%\Scripts\pip.exe" install --quiet faster-whisper
-"%VENV_DIR%\Scripts\python.exe" -c "from faster_whisper import WhisperModel; print('  faster-whisper installed!')"
+REM 3. Install WhisperX (Python 3.12 venv — WhisperX needs <3.14)
+echo   Installing WhisperX (this may take a few minutes)...
+set "WXVENV=%SCRIPT_DIR%venv-whisperx"
+if exist "%WXVENV%\Scripts\python.exe" (
+    echo   WhisperX venv already exists.
+) else (
+    where uv >nul 2>&1
+    if not errorlevel 1 (
+        uv venv --python 3.12 "%WXVENV%"
+        uv pip install --python "%WXVENV%\Scripts\python.exe" whisperx
+    ) else (
+        python3.12 -m venv "%WXVENV%"
+        if errorlevel 1 (
+            echo   Failed to create WhisperX venv. Install Python 3.12 or uv.
+            exit /b 1
+        )
+        "%WXVENV%\Scripts\pip.exe" install --quiet --upgrade pip
+        "%WXVENV%\Scripts\pip.exe" install --quiet whisperx
+    )
+)
+"%WXVENV%\Scripts\python.exe" -c "import whisperx; print('  whisperx installed!')"
 if errorlevel 1 (
-    echo   Failed to install faster-whisper.
+    echo   Failed to install WhisperX.
     exit /b 1
 )
 
