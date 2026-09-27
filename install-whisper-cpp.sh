@@ -56,7 +56,7 @@ cmake -S "$SRC" -B "$SRC/build" -DGGML_VULKAN=ON \
       -DCMAKE_INSTALL_LIBDIR=. \
       -DCMAKE_INSTALL_BINDIR=. \
       -DCMAKE_INSTALL_RPATH='$ORIGIN' \
-      >/tmp/whisper-cmake.log 2>&1 || { tail -30 /tmp/whisper-cmake.log; err "CMake configure failed"; }
+      >"$SRC/cmake.log" 2>&1 || { tail -30 "$SRC/cmake.log"; err "CMake configure failed"; }
 cmake --build "$SRC/build" --config Release --parallel 2>&1 | tail -5
 
 #───────────────────────────────────────────── 3. Install binaries + libs
@@ -66,7 +66,7 @@ cmake --build "$SRC/build" --config Release --parallel 2>&1 | tail -5
 log "Installing to $SHARE (flat layout)..."
 mkdir -p "$SHARE"
 cmake --install "$SRC/build" --prefix "$SHARE" \
-      >/tmp/whisper-install.log 2>&1 || { tail -20 /tmp/whisper-install.log; err "cmake --install failed"; }
+      >"$SRC/install.log" 2>&1 || { tail -20 "$SRC/install.log"; err "cmake --install failed"; }
 
 [ -x "$SHARE/whisper-cli" ] || err "whisper-cli missing after install"
 chmod +x "$SHARE/whisper-cli"

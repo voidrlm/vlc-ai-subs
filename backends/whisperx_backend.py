@@ -65,15 +65,15 @@ class WhisperXBackend(TranscriptionBackend):
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env,
         )
+        from core.debug_log import append_debug_log, debug_log_path
         if debug:
             # Full dump for forensics — survives the subprocess either way.
             import sys as _sys
-            try:
-                with open("/tmp/aisubs_whisperx.log", "a", encoding="utf-8") as f:
-                    f.write(f"--- run: {media_path} {model_name} ---\n")
-                    f.write("STDOUT:\n" + proc.stdout + "\nSTDERR:\n" + proc.stderr + "\n")
-            except OSError:
-                pass
+            append_debug_log(
+                "aisubs_whisperx.log",
+                f"--- run: {media_path} {model_name} ---\n"
+                "STDOUT:\n" + proc.stdout + "\nSTDERR:\n" + proc.stderr + "\n",
+            )
             for _l in (proc.stdout + proc.stderr).splitlines():
                 _sys.stderr.write(f"[whisperx] {_l}\n")
 
@@ -87,7 +87,7 @@ class WhisperXBackend(TranscriptionBackend):
                     proc.returncode,
                     (proc.stderr or "").strip()[-500:],
                     "\n" + tail if tail else "",
-                    "\nFull output: /tmp/aisubs_whisperx.log (run with VSCL_AISUBS_DEBUG=1)"
+                    f"\nFull output: {debug_log_path('aisubs_whisperx.log')} (run with VSCL_AISUBS_DEBUG=1)"
                     if not debug else "",
                 )
             )

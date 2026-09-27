@@ -137,7 +137,7 @@ backends/
 ```bash
 cd vlc-ai-subs
 python3 -m venv venv && venv/bin/pip install pytest              # one-time
-PYTHONPATH= venv/bin/python -m pytest tests/ -v               # suite: 82 tests (model-free)
+PYTHONPATH= venv/bin/python -m pytest tests/ -v               # suite: 87 tests (model-free)
 ```
 
 Coverage: SRT formatting (float-drift-safe rounding, rollover, clamp),
@@ -171,13 +171,16 @@ In VLC: restart → open a video → **View → AI Subs Generator** → click **
 ## Debugging
 
 Add `--debug` to the CLI args (VLC already appends it to every run it
-launches) or set `VSCL_AISUBS_DEBUG=1`. This writes:
+launches) or set `VSCL_AISUBS_DEBUG=1`. This writes to
+`~/.local/share/vlc-ai-subs/logs/` (a private per-user directory — not
+world-writable `/tmp`, so another local user can't pre-plant a symlink there;
+override with `VSCL_AISUBS_LOG_DIR`):
 
 | File | Contents |
 |------|----------|
-| `/tmp/aisubs_debug.log` | main CLI phases + timings (args, backend, model pick, segment count, elapsed) |
-| `/tmp/aisubs_whisperx.log` | full subprocess stdout+stderr dump (WhisperX runtime logs) |
-| `/tmp/aisubs_parakeet.log` | full subprocess stdout+stderr dump (Parakeet runtime logs) |
+| `aisubs_debug.log` | main CLI phases + timings (args, backend, model pick, segment count, elapsed) |
+| `aisubs_whisperx.log` | full subprocess stdout+stderr dump (WhisperX runtime logs) |
+| `aisubs_parakeet.log` | full subprocess stdout+stderr dump (Parakeet runtime logs) |
 
 Debug lines are also mirrored to stderr, so they appear in VLC's own logs
 (`vlc -vvv`). Failed WhisperX runs additionally include the stderr tail and

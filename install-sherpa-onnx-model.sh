@@ -39,11 +39,14 @@ if [ -d "$DEST" ]; then
     ok "Model already present: $DEST"
 else
     URL="$URL_BASE/$TAR"
+    # A random, freshly-created name — a fixed /tmp/$TAR path could be
+    # pre-planted as a symlink by another local user (curl -o follows it).
+    TMP_TAR="$(mktemp "${TMPDIR:-/tmp}/aisubs-XXXXXX")"
     log "Downloading $MODEL model ($URL)..."
-    curl -L --fail --progress-bar -o "/tmp/$TAR" "$URL" || { echo "[ERR] Download failed"; exit 1; }
+    curl -L --fail --progress-bar -o "$TMP_TAR" "$URL" || { echo "[ERR] Download failed"; rm -f "$TMP_TAR"; exit 1; }
     log "Extracting to $SHARE ..."
-    tar xvf "/tmp/$TAR" -C "$SHARE" >/dev/null
-    rm -f "/tmp/$TAR"
+    tar xvf "$TMP_TAR" -C "$SHARE" >/dev/null
+    rm -f "$TMP_TAR"
     ok "Model installed: $DEST"
 fi
 

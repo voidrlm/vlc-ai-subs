@@ -32,14 +32,13 @@ import traceback
 from core.emitter import Emitter
 from core.srt import write_srt
 from core.blocklist import filter_segments
+from core.debug_log import append_debug_log
 from backends import resolve_backend
 
 # ── Debug logging ────────────────────────────────────────────────────
 # Enable with a trailing `--debug` CLI arg or VSCL_AISUBS_DEBUG=1.
-# Debug lines go to stderr AND /tmp/aisubs_debug.log (VLC itself shows
+# Debug lines go to stderr AND a private per-user log file (VLC itself shows
 # stderr in its logs; the file survives terminal restarts).
-
-DEBUG_FILE = "/tmp/aisubs_debug.log"
 
 
 def _debug_enabled() -> bool:
@@ -49,11 +48,7 @@ def _debug_enabled() -> bool:
 def _log_debug(msg: str) -> None:
     line = f"[debug {time.strftime('%H:%M:%S')}] {msg}"
     sys.stderr.write(line + "\n")
-    try:
-        with open(DEBUG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
+    append_debug_log("aisubs_debug.log", line + "\n")
 
 
 # ── Hardware-aware model recommendation ──────────────────────────────────
