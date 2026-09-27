@@ -1,5 +1,7 @@
 """Unit tests for core/srt.py — timestamp formatting + SRT file writing."""
 
+import os
+
 import pytest
 
 from core.srt import format_timestamp, segments_to_srt, write_srt
@@ -64,3 +66,32 @@ def test_write_srt_keeps_unicode(tmp_path):
     out = tmp_path / "uni.srt"
     write_srt([{"start": 0.0, "end": 1.0, "text": "こんにちは — héllo"}], "m.mp4", str(out))
     assert "こんにちは — héllo" in out.read_text(encoding="utf-8")
+
+
+def test_write_srt_refuses_symlink(tmp_path):
+    """A pre-planted symlink at the explicit target must never be followed —
+    the write goes to a fresh path instead and the symlink's target is
+    untouched (temp-name swap attack)."""
+    target = tmp_path / "victim.txt"
+    target.write_text("do not clobber")
+    link = tmp_path / "out.srt"
+    link.symlink_to(target)
+    path = write_srt([{"start": 0.0, "end": 1.0, "text": "line"}], "m.mp4", str(link))
+    assert path is not None and path != str(link)
+    assert target.read_text() == "do not clobber"
+    assert os.path.isfile(path)
+
+
+def test_write_srt_refuses_symlink_derived_path(tmp_path):
+    """Same protection applies when no explicit srt_path is given and the
+    derived <media>.srt path happens to be a symlink."""
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"x")
+    target = tmp_path / "victim.txt"
+    target.write_text("do not clobber")
+    derived = tmp_path / "movie.srt"
+    derived.symlink_to(target)
+    path = write_srt([{"start": 0.0, "end": 1.0, "text": "line"}], str(media))
+    assert path is not None and path != str(derived)
+    assert target.read_text() == "do not clobber"
+    assert os.path.isfile(path)

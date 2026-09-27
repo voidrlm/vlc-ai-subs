@@ -61,12 +61,12 @@ class ParakeetBackend(TranscriptionBackend):
         )
         if debug:
             import sys as _sys
-            try:
-                with open("/tmp/aisubs_parakeet.log", "a", encoding="utf-8") as f:
-                    f.write(f"--- run: {media_path} {model_name} ---\n")
-                    f.write("STDOUT:\n" + proc.stdout + "\nSTDERR:\n" + proc.stderr + "\n")
-            except OSError:
-                pass
+            from core.debug_log import append_debug_log
+            append_debug_log(
+                "aisubs_parakeet.log",
+                f"--- run: {media_path} {model_name} ---\n"
+                "STDOUT:\n" + proc.stdout + "\nSTDERR:\n" + proc.stderr + "\n",
+            )
             for _l in (proc.stdout + proc.stderr).splitlines():
                 _sys.stderr.write(f"[parakeet] {_l}\n")
 
