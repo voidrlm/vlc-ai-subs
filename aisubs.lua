@@ -35,19 +35,16 @@ local lang_input      = nil
 local task_dropdown   = nil
 local mode_dropdown   = nil
 local status_label    = nil
-local progress_bar    = nil
 local debug_label     = nil
 local osd_channel     = nil
 
 -- Polling state (set by start_generation, used by poll_progress)
 local _poll_tmp      = nil
 local _poll_mode     = nil
-local _poll_model    = nil
 local _poll_engine   = nil
 local _poll_tmr      = nil
-local _poll_secs     = 0
-local _poll_duration = 0
-local _poll_est_total = 30
+local _poll_started  = nil
+local _poll_source   = nil
 local POLL_US     = 1000000  -- poll every 1 second (was 3s)
 
 -- Seed the temp-name RNG once at load — predictable /tmp names are a
@@ -67,7 +64,10 @@ function activate()
     vlc.msg.info("[AI Subs] activate() called")
     create_dialog()
 end
-function deactivate() if dlg then dlg:delete(); dlg = nil end end
+function deactivate()
+    if _poll_tmr then _poll_tmr:cancel(); _poll_tmr = nil end
+    if dlg then dlg:delete(); dlg = nil end
+end
 function close()      deactivate() end
 
 function menu() return {"Generate Subtitles"} end
@@ -115,7 +115,7 @@ function create_dialog()
 
     dlg:add_button("Generate", start_generation, 1, 6, 3, 1)
     status_label = dlg:add_label("Ready. Play a media file and click Generate.", 1, 7, 3, 1)
-    progress_bar = dlg:add_progress_bar(0, 1, 8, 3, 1)
+    dlg:add_button("Check status / load captions", poll_progress, 1, 8, 3, 1)
     debug_label  = dlg:add_label("", 1, 9, 3, 1)
     dlg:show()
 end
@@ -167,7 +167,7 @@ function add_subtitle_track(srt_path)
     local ok
     ok = pcall(function() vlc.player.add_subtitle(srt_path) end)
     if ok then return true end
-    ok = pcall(function() vlc.input.add_subtitle(srt_path) end)
+    ok = pcall(function() vlc.input.add_subtitle(srt_path, true) end)
     if ok then return true end
     ok = pcall(function()
         local input = vlc.object.input()
@@ -323,10 +323,9 @@ end
 ----------------------------------------------------------------
 
 function start_generation()
-    -- Cancel any in-progress transcription
-    if _poll_tmr then
-        pcall(function() _poll_tmr:cancel() end)
-        _poll_tmr = nil
+    if _poll_tmp then
+        set_status("A job is pending. Use Check status / load captions.")
+        return
     end
 
     local media_path, err = get_media_path()
@@ -375,9 +374,6 @@ function start_generation()
     -- Unix:    trailing & → shell forks Python and exits immediately.
     -- In both cases io.popen returns at once and we poll tmp_file via vlc.timer.
     local engine = get_engine()
-    -- Parakeet ignores the model dropdown (fixed parakeet-tdt-0.6b-v2);
-    -- show the model that actually runs in the status lines.
-    local shown_model = (engine == "parakeet") and "parakeet-tdt-0.6b-v2" or model
     -- Realtime-OSD mode: write the SRT to a writable temp path (never next
     -- to the media, and immune to read-only media dirs). "Generate & Load"
     -- passes "" so the caller derives <media>.srt.
@@ -432,79 +428,48 @@ function start_generation()
         os.execute(cmd .. " &")
     end
 
-    -- Poll tmp_file every second; VLC's thread stays free the whole time
+    -- Keep the result available for dialog or timer callbacks.
     _poll_tmp    = tmp_file
     _poll_mode   = mode
-    _poll_model  = shown_model
     _poll_engine = (engine == "parakeet") and "Parakeet" or "WhisperX"
-    _poll_secs   = 0
-
-    -- Estimate total time: rough RTF × audio duration (engine-dependent).
-    -- Parakeet ≈ 10× realtime on CPU (0.1); WhisperX ≈ 0.3× GPU / 2× CPU.
-    local duration = get_media_duration()
-    _poll_duration = duration or 0
-    if _poll_duration > 0 then
-        if engine == "parakeet" then
-            _poll_est_total = _poll_duration * 0.1
-        else
-            _poll_est_total = _poll_duration * 0.5
-        end
-    else
-        _poll_est_total = 30  -- unknown, guess 30s
-    end
-
-    set_status("Transcribing with " .. _poll_engine .. " (" .. shown_model .. ")... please wait")
-    progress_bar:set_value(0)
-
-    -- Show debug command so user can run it from terminal if needed
+    _poll_started = os.time()
+    _poll_source = media_path
+    set_status("Transcribing with " .. _poll_engine .. ". Use Check status / load captions.")
     debug_label:set_text("Debug: " .. cmd)
-    _poll_tmr = vlc.timer(poll_progress)
-    _poll_tmr:schedule(POLL_US)
+    -- Stock VLC 3 has no Lua extension timer. Its dialog button remains
+    -- responsive while the external decoder runs. Use a timer if supplied.
+    if type(vlc.timer) == "function" then
+        _poll_tmr = vlc.timer(poll_progress)
+        _poll_tmr:schedule(POLL_US)
+    end
 end
 
-----------------------------------------------------------------
--- Polling callback — called by vlc.timer every POLL_US microseconds
-----------------------------------------------------------------
-
 function poll_progress()
-    _poll_secs = _poll_secs + (POLL_US / 1000000)
-
-    -- Update progress bar based on elapsed vs estimated
-    if _poll_est_total > 0 then
-        local pct = math.min(95, (_poll_secs / _poll_est_total) * 100)
-        progress_bar:set_value(pct)
-    end
-
-    local f = io.open(_poll_tmp, "r")
-    if not f then
-        -- Temp file gone — shouldn't happen; keep waiting
-        local eta = math.max(0, _poll_est_total - _poll_secs)
-        set_status(string.format("Transcribing with %s (%s)... %ds  ETA ~%ds", _poll_engine, _poll_model, _poll_secs, eta))
-        _poll_tmr:schedule(POLL_US)
+    if not dlg then return end
+    if not _poll_tmp then
+        set_status("No pending job.")
         return
     end
-
     local last_line = nil
-    for line in f:lines() do last_line = line end
-    f:close()
-
-    if not last_line or last_line == "init" then
-        -- Python hasn't written output yet
-        set_status(string.format("Loading model / starting... %ds", _poll_secs))
-        _poll_tmr:schedule(POLL_US)
-        return
+    local f = io.open(_poll_tmp, "r")
+    if f then
+        for line in f:lines() do last_line = line end
+        f:close()
     end
-
-    local d = parse_json(last_line)
+    local d = last_line and parse_json(last_line)
     if d and (d.type == "done" or d.type == "error") then
-        -- Python finished — process results
         _poll_tmr = nil
-        progress_bar:set_value(100)
-        process_results(_poll_tmp, _poll_mode)
+        if d.type == "done" and _poll_source ~= get_media_path() then
+            set_status("Return to the original media and check again to load its captions.")
+            return
+        end
+        local result = _poll_tmp
+        _poll_tmp = nil
+        process_results(result, _poll_mode)
     else
-        local eta = math.max(0, _poll_est_total - _poll_secs)
-        set_status(string.format("Transcribing with %s (%s)... %ds  ETA ~%ds", _poll_engine, _poll_model, _poll_secs, eta))
-        _poll_tmr:schedule(POLL_US)
+        local elapsed = os.difftime(os.time(), _poll_started)
+        set_status(string.format("%s: %ds elapsed. Use Check status / load captions.", _poll_engine, elapsed))
+        if _poll_tmr then _poll_tmr:schedule(POLL_US) end
     end
 end
 

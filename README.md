@@ -194,6 +194,8 @@ stdout's last JSONL line in the emitted error — no more silent failures.
 - **Task** — `Translate to English` (default) or `Transcribe (same language)`.
 - **Mode** — `Generate & Load SRT` (default) or `Real-time OSD`.
 
+On VLC 3, click **Check status / load captions** after starting a job. You can use the player while the decoder runs. In **Generate & Load SRT** mode, checking a finished job selects its subtitle track for the original recording.
+
 ## Manual Installation
 
 If the setup script doesn't work for your system:
